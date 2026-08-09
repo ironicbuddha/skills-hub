@@ -196,21 +196,59 @@ const approvalEvidenceReference = z.object({
   immutableLocator: ordinaryText,
   retention: ordinaryText,
 }).strict();
-const conflictRecord = z.object({
+/** Runtime schema for one exact lesson revision reference. */
+export const lessonRevisionReferenceSchema = z.object({ lessonId: ordinaryText, revisionId: ordinaryText }).strict();
+
+/** Runtime schema for an explicit contradiction and its resolution metadata. */
+export const conflictRecordSchema = z.object({
   conflictId: ordinaryText,
-  revisionIds: z.array(ordinaryText).min(2),
+  lessonRevisions: z.array(lessonRevisionReferenceSchema).min(2),
   overlappingScope: sanitizedText,
   contradictoryObligations: z.array(sanitizedText).min(2),
   discoveredAt: isoInstant,
   discoveredBy: ordinaryText,
+  discoveryProvenance: ordinaryText,
   severity: z.enum(["low", "medium", "high", "critical"]),
+  blocking: z.boolean(),
+  credibleHarm: z.boolean(),
   status: z.enum(["open", "resolved", "excepted"]),
   owner: ordinaryText,
   resolutionRationale: sanitizedText.nullable(),
   resolutionAuthority: ordinaryText.nullable(),
   exceptionExpiresAt: isoInstant.nullable(),
-  resultingRevisionIds: z.array(ordinaryText),
+  resultingLessonRevisions: z.array(lessonRevisionReferenceSchema),
 }).strict();
+
+/** Runtime schema for recording a newly discovered contradiction. */
+export const conflictDiscoveryCommandSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+  conflict: conflictRecordSchema.pick({
+    conflictId: true,
+    lessonRevisions: true,
+    overlappingScope: true,
+    contradictoryObligations: true,
+    discoveryProvenance: true,
+    severity: true,
+    blocking: true,
+    credibleHarm: true,
+    owner: true,
+  }),
+}).strict();
+
+/** Runtime schema for an accountable human Conflict disposition. */
+export const conflictResolutionCommandSchema = z.object({
+  actor: actor.extend({ kind: z.literal("human") }),
+  occurredAt: isoInstant,
+  status: z.enum(["resolved", "excepted"]),
+  rationale: sanitizedText,
+  exceptionExpiresAt: isoInstant.optional(),
+  resultingLessonRevisions: z.array(lessonRevisionReferenceSchema),
+}).strict().superRefine((command, context) => {
+  if (command.status === "excepted" && !command.exceptionExpiresAt) {
+    context.addIssue({ code: "custom", message: "an excepted Conflict requires an expiry" });
+  }
+});
 const enforcementLink = z.object({
   linkId: ordinaryText,
   controlClass: ordinaryText,
@@ -250,7 +288,7 @@ export const approvalCommandSchema = z
     expiresAt: isoInstant.optional(),
     expiryRationale: sanitizedText.optional(),
     conflictReferences: z.array(ordinaryText),
-    conflictRecords: z.array(conflictRecord),
+    conflictRecords: z.array(conflictRecordSchema),
     requiredEnforcementClasses: z.array(ordinaryText).min(1),
     enforcementLinks: z.array(enforcementLink).min(1),
     rollbackPlan,

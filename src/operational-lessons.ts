@@ -13,6 +13,11 @@ import {
   reviewSubmissionCommandSchema,
   terminalDispositionCommandSchema,
 } from "./operational-lessons-schema.ts";
+import type {
+  ConflictRecord,
+  ConflictSuspensionLifecycleEvent,
+  LessonRevisionReference,
+} from "./operational-lesson-conflicts.ts";
 
 /** A fact category permitted at the sanitized capture boundary. */
 export type FactClass = "operation" | "observed-outcome" | "trust-boundary" | "impact";
@@ -186,18 +191,21 @@ export interface ApprovalCommand {
   conflictReferences: string[];
   conflictRecords: {
     conflictId: string;
-    revisionIds: string[];
+    lessonRevisions: LessonRevisionReference[];
     overlappingScope: string;
     contradictoryObligations: string[];
     discoveredAt: string;
     discoveredBy: string;
+    discoveryProvenance: string;
     severity: "low" | "medium" | "high" | "critical";
+    blocking: boolean;
+    credibleHarm: boolean;
     status: "open" | "resolved" | "excepted";
     owner: string;
     resolutionRationale: string | null;
     resolutionAuthority: string | null;
     exceptionExpiresAt: string | null;
-    resultingRevisionIds: string[];
+    resultingLessonRevisions: LessonRevisionReference[];
   }[];
   requiredEnforcementClasses: string[];
   enforcementLinks: {
@@ -567,7 +575,8 @@ export type LifecycleEvent =
   | ReplacementLifecycleEvent
   | BlockedReplacementLifecycleEvent
   | CrossLessonSupersessionLifecycleEvent
-  | RetirementLifecycleEvent;
+  | RetirementLifecycleEvent
+  | ConflictSuspensionLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -935,9 +944,11 @@ export function approveCandidate(
     ));
   const conflictsAreBound = parsed.success
     && parsed.data.conflictReferences.every((conflictId) => parsed.data.conflictRecords.some((record) =>
-      record.conflictId === conflictId && record.revisionIds.includes(candidate.revisionId)))
+      record.conflictId === conflictId && record.lessonRevisions.some(({ lessonId, revisionId }) =>
+        lessonId === candidate.lessonId && revisionId === candidate.revisionId)))
     && parsed.data.conflictRecords.every((record) =>
-      record.revisionIds.includes(candidate.revisionId)
+      record.lessonRevisions.some(({ lessonId, revisionId }) =>
+        lessonId === candidate.lessonId && revisionId === candidate.revisionId)
       && parsed.data.conflictReferences.includes(record.conflictId)
       && (record.status === "open" || Boolean(record.resolutionRationale && record.resolutionAuthority))
       && (record.status !== "excepted"
@@ -1037,7 +1048,8 @@ export function activateApprovedLesson(
       && isAuthorizedAttestation(command.nonDeterminismRationale, approval, command.occurredAt))
   ));
   const hasNoOpenBlockingConflict = Boolean(command && approval.conflictRecords.every((conflict) =>
-    conflict.status === "resolved"
+    !conflict.blocking
+    || conflict.status === "resolved"
     || (conflict.status === "excepted"
       && conflict.exceptionExpiresAt
       && Date.parse(conflict.exceptionExpiresAt) > Date.parse(command.occurredAt))));

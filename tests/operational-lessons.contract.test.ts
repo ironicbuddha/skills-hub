@@ -45,6 +45,14 @@ import {
   type CrossLessonSupersessionSink,
   type RetiredLesson,
 } from "../src/operational-lessons.ts";
+import {
+  activateSafeConflictReplacement,
+  discoverConflict,
+  resolveConflict,
+  type ConflictRecord,
+  type ConflictSink,
+  type ConflictResolutionSink,
+} from "../src/operational-lesson-conflicts.ts";
 
 function captureSink(
   revisions: CandidateLesson[] = [],
@@ -983,18 +991,24 @@ test("a reasoned authorized expiring waiver can cover a required enforcement cla
 test("an open blocking conflict prevents activation", () => {
   const conflict = {
     conflictId: "conflict-1",
-    revisionIds: ["lesson_publication_boundary:1", "lesson_other:1"],
+    lessonRevisions: [
+      { lessonId: "lesson_publication_boundary", revisionId: "lesson_publication_boundary:1" },
+      { lessonId: "lesson_other", revisionId: "lesson_other:1" },
+    ],
     overlappingScope: "Repository Markdown publication.",
     contradictoryObligations: ["Use the shell interpreter.", "Never use the shell interpreter."],
     discoveredAt: "2026-08-09T10:20:00.000Z",
     discoveredBy: "human-reviewer",
+    discoveryProvenance: "repository-guidance-review-17",
     severity: "high" as const,
+    blocking: true,
+    credibleHarm: true,
     status: "open" as const,
     owner: "platform-safety",
     resolutionRationale: null,
     resolutionAuthority: null,
     exceptionExpiresAt: null,
-    resultingRevisionIds: [],
+    resultingLessonRevisions: [],
   };
   const approved = approvedCandidate({ conflictReferences: [conflict.conflictId], conflictRecords: [conflict] });
 
@@ -1002,6 +1016,95 @@ test("an open blocking conflict prevents activation", () => {
     activateAsSoleRevision() { assert.fail("an open conflict must block activation"); },
     appendBlockedActivation() {},
   }), CandidateTransitionError);
+});
+
+test("conflicting repository guidance is recorded, suspended, and resolved without losing history", () => {
+  const active = activeCandidate();
+  const conflictingActive: ActiveLesson = {
+    ...active,
+    lessonId: "lesson_repository_shell_guidance",
+    revisionId: "lesson_repository_shell_guidance:3",
+    revision: 3,
+    guidance: "Publish Markdown by constructing a shell command.",
+  };
+  const recorded: ConflictRecord[] = [];
+  const suspended: RetiredLesson[] = [];
+  const events: LifecycleEvent[] = [];
+  const sink: ConflictSink = {
+    recordConflict(conflict, retired, conflictEvents) {
+      recorded.push(conflict);
+      suspended.push(...retired);
+      events.push(...conflictEvents);
+    },
+  };
+
+  const outcome = discoverConflict([active, conflictingActive], {
+    actor: { identity: "safety-monitor", authority: "conflict-discovery", kind: "service" },
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    conflict: {
+      conflictId: "conflict-repository-guidance",
+      lessonRevisions: [
+        { lessonId: active.lessonId, revisionId: active.revisionId },
+        { lessonId: "lesson_repository_shell_guidance", revisionId: "lesson_repository_shell_guidance:3" },
+      ],
+      overlappingScope: "Repository instructions that publish Markdown.",
+      contradictoryObligations: [
+        "Publish Markdown by constructing a shell command.",
+        "Publish Markdown only through a data-safe boundary.",
+      ],
+      discoveryProvenance: "repository-guidance-review-17",
+      severity: "critical",
+      blocking: false,
+      credibleHarm: true,
+      owner: "platform-safety",
+    },
+  }, sink);
+
+  assert.equal(outcome.conflict.status, "open");
+  assert.deepEqual(recorded, [outcome.conflict]);
+  assert.equal(outcome.affected[0]?.state, "retired");
+  assert.equal(outcome.affected[1]?.state, "retired");
+  assert.equal(suspended.length, 2);
+  assert.equal(suspended[0]?.retirementReason, "suspended");
+  assert.equal(selectConsumerGuidance(outcome.affected[0]!), null);
+  assert.equal(events[0]?.reason, "active lesson suspended by credible harmful conflict");
+
+  const history: ConflictRecord[] = [outcome.conflict];
+  const safeReplacement = approvedSuccessor(active);
+  const resolutionSink: ConflictResolutionSink = {
+    appendConflictResolution(_prior, resolved) { history.push(resolved); },
+  };
+  const resolved = resolveConflict(outcome.conflict, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-08-09T13:00:00.000Z",
+    status: "resolved",
+    rationale: "Review confirmed retirement; no conflicting guidance remains eligible.",
+    resultingLessonRevisions: [{
+      lessonId: safeReplacement.lessonId,
+      revisionId: safeReplacement.revisionId,
+    }],
+  }, resolutionSink);
+
+  assert.equal(resolved.status, "resolved");
+  assert.equal(resolved.resolutionAuthority, "lesson-approver");
+  assert.deepEqual(history, [outcome.conflict, resolved]);
+  assert.equal(Object.isFrozen(outcome.conflict), true);
+  assert.equal(Object.isFrozen(resolved), true);
+
+  const activated = activateSafeConflictReplacement(
+    suspended[0]!,
+    safeReplacement,
+    resolved,
+    {
+      ...activationCommand(),
+      occurredAt: "2026-08-09T13:10:00.000Z",
+      revisionId: safeReplacement.revisionId,
+      regressionEvidence: ["regression-safe-publication-v2"],
+    },
+    { activateAsSoleRevision() {}, appendBlockedActivation() {} },
+  );
+  assert.equal(activated.state, "active");
+  assert.equal(selectConsumerGuidance(activated), safeReplacement.guidance);
 });
 
 test("replacement atomically activates the approved successor and supersedes its active predecessor", () => {
