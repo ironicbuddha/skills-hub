@@ -9,6 +9,7 @@ import { test } from "@jest/globals";
 
 import {
   approveCandidate,
+  activateApprovedLesson,
   captureCandidate,
   CandidateTransitionError,
   CandidateValidationError,
@@ -22,6 +23,9 @@ import {
   type ApprovalCommand,
   type ApprovalSink,
   type ApprovedLesson,
+  type ActivationCommand,
+  type ActivationSink,
+  type ActiveLesson,
   type CandidateLesson,
   type LifecycleEvent,
   type ReviewAssignment,
@@ -176,6 +180,21 @@ function reviewedCandidate() {
     assignment: reviewAssignment(),
   }, { appendReviewTransition() {}, appendBlockedReviewAttempt() {} });
 }
+
+function approvedCandidate(changes: Partial<ApprovalCommand> = {}) {
+  return approveCandidate(reviewedCandidate(), { ...approvalCommand(), ...changes }, {
+    appendApproval() {},
+    appendBlockedApproval() {},
+  });
+}
+
+const activationCommand = (): ActivationCommand => ({
+  actor: { identity: "deployment-service", authority: "lesson-activator", kind: "service" },
+  occurredAt: "2026-08-09T11:00:00.000Z",
+  revisionId: "lesson_publication_boundary:1",
+  regressionEvidence: ["regression-safe-publication"],
+  enforcementWaivers: [],
+});
 
 test("capture creates immutable revision 1 and an append-only event", () => {
   const revisions: CandidateLesson[] = [];
@@ -743,6 +762,129 @@ test("confidence and weak proxies cannot substitute for approval evidence", () =
     ...input,
     weakProxies: ["retrieval-count", "model-self-report", "absence-of-reports"],
   }, { appendApproval() { assert.fail("weak proxies are not evidence"); }, appendBlockedApproval() {} }), CandidateTransitionError);
+});
+
+test("an approved exact revision activates only after regression, conflict, and enforcement gates pass", () => {
+  const approved = approvedCandidate({
+    evidenceReferences: [
+      ...approvalCommand().evidenceReferences,
+      {
+        evidenceId: "regression-safe-publication",
+        kind: "regression",
+        supportedRevision: 1,
+        sanitizedSummary: "The safe publication regression passed in the deployment environment.",
+        classification: "internal",
+        accessBoundary: "lesson-reviewers",
+        observedAt: "2026-08-09T10:25:00.000Z",
+        collector: "deployment-service",
+        immutableLocator: "sha256:regression-safe-publication",
+        retention: "365d",
+      },
+    ],
+  });
+  const revisions: ActiveLesson[] = [];
+  const events: LifecycleEvent[] = [];
+  const sink: ActivationSink = {
+    activateAsSoleRevision(revision, event) { revisions.push(revision); events.push(event); },
+    appendBlockedActivation(event) { events.push(event); },
+  };
+
+  const active = activateApprovedLesson(approved, activationCommand(), sink);
+
+  assert.equal(active.state, "active");
+  assert.equal(active.activatedAt, "2026-08-09T11:00:00.000Z");
+  assert.deepEqual(revisions, [active]);
+  assert.equal(events[0]?.toState, "active");
+  assert.equal(events[0]?.outcome, "completed");
+  assert.equal(selectConsumerGuidance(active), approved.guidance);
+});
+
+test.each([
+  ["wrong exact revision", { revisionId: "lesson_publication_boundary:2" }],
+  ["missing regression evidence", { regressionEvidence: [] }],
+] as const)("activation blocks %s and leaves the revision approved", (_name, changes) => {
+  const approved = approvedCandidate();
+  const events: LifecycleEvent[] = [];
+
+  assert.throws(() => activateApprovedLesson(approved, { ...activationCommand(), ...changes }, {
+    activateAsSoleRevision() { assert.fail("a failed gate must not activate"); },
+    appendBlockedActivation(event) { events.push(event); },
+  }), CandidateTransitionError);
+  assert.equal(approved.state, "approved");
+  assert.equal(events[0]?.fromState, "approved");
+  assert.equal(events[0]?.toState, "approved");
+  assert.equal(events[0]?.outcome, "blocked");
+});
+
+test("an Enforcement Link does not satisfy activation unless its deployment is ready", () => {
+  const approved = approvedCandidate({
+    enforcementLinks: [{ ...approvalCommand().enforcementLinks[0]!, deploymentState: "planned" }],
+  });
+
+  assert.throws(() => activateApprovedLesson(approved, {
+    ...activationCommand(),
+    nonDeterminismRationale: {
+      rationale: "The model-facing behavior cannot be checked deterministically.",
+      approvedBy: "human-reviewer",
+      authority: "lesson-approver",
+      approvedAt: "2026-08-09T10:50:00.000Z",
+    },
+    regressionEvidence: undefined,
+  }, {
+    activateAsSoleRevision() { assert.fail("a planned link is not ready"); },
+    appendBlockedActivation() {},
+  }), CandidateTransitionError);
+});
+
+test("a reasoned authorized expiring waiver can cover a required enforcement class", () => {
+  const approved = approvedCandidate({
+    enforcementLinks: [{ ...approvalCommand().enforcementLinks[0]!, deploymentState: "planned" }],
+  });
+  const command = activationCommand();
+  const active = activateApprovedLesson(approved, {
+    ...command,
+    regressionEvidence: undefined,
+    nonDeterminismRationale: {
+      rationale: "The model-facing behavior cannot be checked deterministically.",
+      approvedBy: "human-reviewer",
+      authority: "lesson-approver",
+      approvedAt: "2026-08-09T10:50:00.000Z",
+    },
+    enforcementWaivers: [{
+      controlClass: "regression-test",
+      reason: "The deployment is staged while the isolated safety check remains mandatory.",
+      approvedBy: "human-reviewer",
+      authority: "lesson-approver",
+      approvedAt: "2026-08-09T10:50:00.000Z",
+      expiresAt: "2026-08-10T11:00:00.000Z",
+    }],
+  }, { activateAsSoleRevision() {}, appendBlockedActivation() {} });
+
+  assert.equal(active.state, "active");
+});
+
+test("an open blocking conflict prevents activation", () => {
+  const conflict = {
+    conflictId: "conflict-1",
+    revisionIds: ["lesson_publication_boundary:1", "lesson_other:1"],
+    overlappingScope: "Repository Markdown publication.",
+    contradictoryObligations: ["Use the shell interpreter.", "Never use the shell interpreter."],
+    discoveredAt: "2026-08-09T10:20:00.000Z",
+    discoveredBy: "human-reviewer",
+    severity: "high" as const,
+    status: "open" as const,
+    owner: "platform-safety",
+    resolutionRationale: null,
+    resolutionAuthority: null,
+    exceptionExpiresAt: null,
+    resultingRevisionIds: [],
+  };
+  const approved = approvedCandidate({ conflictReferences: [conflict.conflictId], conflictRecords: [conflict] });
+
+  assert.throws(() => activateApprovedLesson(approved, activationCommand(), {
+    activateAsSoleRevision() { assert.fail("an open conflict must block activation"); },
+    appendBlockedActivation() {},
+  }), CandidateTransitionError);
 });
 
 test("Markdown is published as inert, byte-preserved data", () => {

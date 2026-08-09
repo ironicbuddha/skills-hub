@@ -1,6 +1,8 @@
 import type { Writable } from "node:stream";
 
 import {
+  activationAttemptContextSchema,
+  activationCommandSchema,
   approvalAttemptContextSchema,
   approvalCommandSchema,
   captureCandidateCommandSchema,
@@ -222,12 +224,44 @@ export interface ApprovedLesson extends CandidateLessonFields {
   approval: Readonly<ApprovalRecord>;
 }
 
+export interface NonDeterminismRationale {
+  rationale: string;
+  approvedBy: string;
+  authority: string;
+  approvedAt: string;
+}
+
+export interface EnforcementWaiver {
+  controlClass: string;
+  reason: string;
+  approvedBy: string;
+  authority: string;
+  approvedAt: string;
+  expiresAt: string;
+}
+
+export interface ActivationCommand {
+  actor: Actor;
+  occurredAt: string;
+  revisionId: string;
+  regressionEvidence?: string[] | undefined;
+  nonDeterminismRationale?: NonDeterminismRationale | undefined;
+  enforcementWaivers: EnforcementWaiver[];
+}
+
+export interface ActiveLesson extends CandidateLessonFields {
+  state: "active";
+  reviewAssignment: Readonly<ReviewAssignment>;
+  approval: Readonly<ApprovalRecord>;
+  activatedAt: string;
+}
+
 export type CandidateLesson =
   | CapturedCandidateLesson
   | UnderReviewCandidateLesson
   | RejectedCandidateLesson;
 
-export type OperationalLesson = CandidateLesson | ApprovedLesson;
+export type OperationalLesson = CandidateLesson | ApprovedLesson | ActiveLesson;
 
 /** The append-only audit event emitted for a successful capture. */
 export interface CaptureLifecycleEvent {
@@ -363,6 +397,36 @@ export interface BlockedApprovalLifecycleEvent {
   outcome: "blocked";
 }
 
+export interface ActivationLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "approved";
+  toState: "active";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "activation gates satisfied";
+  regressionEvidence: readonly string[];
+  enforcementWaivers: readonly Readonly<EnforcementWaiver>[];
+  outcome: "completed";
+}
+
+export interface BlockedActivationLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "approved";
+  toState: "approved";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "activation gates were not satisfied";
+  outcome: "blocked";
+}
+
 export type LifecycleEvent =
   | CaptureLifecycleEvent
   | ReviewLifecycleEvent
@@ -372,7 +436,9 @@ export type LifecycleEvent =
   | RejectionLifecycleEvent
   | BlockedRejectionLifecycleEvent
   | ApprovalLifecycleEvent
-  | BlockedApprovalLifecycleEvent;
+  | BlockedApprovalLifecycleEvent
+  | ActivationLifecycleEvent
+  | BlockedActivationLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -400,6 +466,12 @@ export interface RejectionSink {
 export interface ApprovalSink {
   appendApproval(revision: ApprovedLesson, event: ApprovalLifecycleEvent): void;
   appendBlockedApproval(event: BlockedApprovalLifecycleEvent): void;
+}
+
+export interface ActivationSink {
+  /** Atomically makes this revision the lesson's sole active revision and appends the event. */
+  activateAsSoleRevision(revision: ActiveLesson, event: ActivationLifecycleEvent): void;
+  appendBlockedActivation(event: BlockedActivationLifecycleEvent): void;
 }
 
 export interface SubmitForReviewCommand {
@@ -749,10 +821,98 @@ export function approveCandidate(
   return approved;
 }
 
+/** Activates an approved exact revision only after all deployment gates pass. */
+export function activateApprovedLesson(
+  approved: ApprovedLesson,
+  input: unknown,
+  sink: ActivationSink,
+): ActiveLesson {
+  const parsed = activationCommandSchema.safeParse(input);
+  const attempt = activationAttemptContextSchema.safeParse(input);
+  const command = parsed.success ? parsed.data : undefined;
+  const approval = approved.approval;
+  const approvalIsCurrent = command?.revisionId === approved.revisionId
+    && approval.revisionId === approved.revisionId;
+  const regressionEvidenceIsValid = Boolean(command && (
+    command.regressionEvidence?.every((evidenceId) => approval.evidenceReferences.some((reference) =>
+      reference.evidenceId === evidenceId
+      && reference.kind === "regression"
+      && reference.supportedRevision === approved.revision
+      && Date.parse(reference.observedAt) <= Date.parse(command.occurredAt)))
+    || (command.nonDeterminismRationale
+      && isAuthorizedAttestation(command.nonDeterminismRationale, approval, command.occurredAt))
+  ));
+  const hasNoOpenBlockingConflict = Boolean(command && approval.conflictRecords.every((conflict) =>
+    conflict.status === "resolved"
+    || (conflict.status === "excepted"
+      && conflict.exceptionExpiresAt
+      && Date.parse(conflict.exceptionExpiresAt) > Date.parse(command.occurredAt))));
+  const enforcementIsReady = Boolean(command && approval.requiredEnforcementClasses.every((controlClass) => {
+    const readyLink = approval.enforcementLinks.some((link) =>
+      link.controlClass === controlClass
+      && link.implementedRevisionId === approved.revisionId
+      && (link.deploymentState === "ready" || link.deploymentState === "active"));
+    const waiver = command.enforcementWaivers.find((candidate) => candidate.controlClass === controlClass);
+    const validWaiver = waiver
+      && isAuthorizedAttestation(waiver, approval, command.occurredAt)
+      && Date.parse(waiver.expiresAt) > Date.parse(command.occurredAt);
+    return readyLink || Boolean(validWaiver);
+  }));
+  const timingIsValid = Boolean(command
+    && Date.parse(command.occurredAt) >= Date.parse(approval.approvedAt)
+    && (!approval.expiresAt || Date.parse(command.occurredAt) < Date.parse(approval.expiresAt)));
+
+  if (!parsed.success || !approvalIsCurrent || !regressionEvidenceIsValid
+    || !hasNoOpenBlockingConflict || !enforcementIsReady || !timingIsValid) {
+    if (!attempt.success) {
+      throw new CandidateValidationError(parsed.success
+        ? "invalid activation actor context"
+        : parsed.error.issues.map(({ message }) => message).join("; "));
+    }
+    const blockedEvent = deepFreeze({
+      eventId: `${approved.lessonId}:${approved.revision}:activation-blocked:${attempt.data.occurredAt}`,
+      lessonId: approved.lessonId,
+      fromState: "approved" as const,
+      toState: "approved" as const,
+      revision: approved.revision,
+      actor: attempt.data.actor.identity,
+      actorAuthority: attempt.data.actor.authority,
+      actorKind: attempt.data.actor.kind,
+      occurredAt: attempt.data.occurredAt,
+      reason: "activation gates were not satisfied" as const,
+      outcome: "blocked" as const,
+    });
+    sink.appendBlockedActivation(blockedEvent);
+    throw new CandidateTransitionError(blockedEvent.reason);
+  }
+
+  const active = deepFreeze({
+    ...approved,
+    state: "active" as const,
+    activatedAt: command.occurredAt,
+  });
+  const event = deepFreeze({
+    eventId: `${approved.lessonId}:${approved.revision}:activated`,
+    lessonId: approved.lessonId,
+    fromState: "approved" as const,
+    toState: "active" as const,
+    revision: approved.revision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: command.actor.kind,
+    occurredAt: command.occurredAt,
+    reason: "activation gates satisfied" as const,
+    regressionEvidence: command.regressionEvidence ?? [],
+    enforcementWaivers: command.enforcementWaivers,
+    outcome: "completed" as const,
+  });
+  sink.activateAsSoleRevision(active, event);
+  return active;
+}
+
 /** Returns guidance only for consumer-eligible revisions; candidates yield none. */
-export function selectConsumerGuidance(lesson: OperationalLesson): null {
-  void lesson;
-  return null;
+export function selectConsumerGuidance(lesson: OperationalLesson): string | null {
+  return lesson.state === "active" ? lesson.guidance : null;
 }
 
 /** Writes Markdown as data without constructing interpreter source. */
@@ -806,6 +966,16 @@ function createCaptureEvent(
     reason: "sanitized candidate captured",
     evidenceReferences: evidenceReferences.map(({ evidenceId }) => evidenceId),
   });
+}
+
+function isAuthorizedAttestation(
+  attestation: Pick<NonDeterminismRationale, "approvedBy" | "authority" | "approvedAt">,
+  approval: ApprovalRecord,
+  occurredAt: string,
+): boolean {
+  return attestation.approvedBy === approval.approver
+    && attestation.authority === approval.authority
+    && Date.parse(attestation.approvedAt) <= Date.parse(occurredAt);
 }
 
 // Captured records own their parsed values, so recursive freezing cannot mutate caller input.

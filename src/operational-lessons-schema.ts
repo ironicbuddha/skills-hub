@@ -248,3 +248,35 @@ export const approvalCommandSchema = z
 
 /** Actor metadata retained when a governance-relevant approval attempt is blocked. */
 export const approvalAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();
+
+const authorizedException = z.object({
+  rationale: sanitizedText,
+  approvedBy: ordinaryText,
+  authority: ordinaryText,
+  approvedAt: isoInstant,
+}).strict();
+const enforcementWaiver = z.object({
+  controlClass: ordinaryText,
+  reason: sanitizedText,
+  approvedBy: ordinaryText,
+  authority: ordinaryText,
+  approvedAt: isoInstant,
+  expiresAt: isoInstant,
+}).strict();
+
+/** Runtime schema for activating an approved exact Lesson Revision. */
+export const activationCommandSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+  revisionId: ordinaryText,
+  regressionEvidence: z.array(ordinaryText).min(1).optional(),
+  nonDeterminismRationale: authorizedException.optional(),
+  enforcementWaivers: z.array(enforcementWaiver),
+}).strict().superRefine((command, context) => {
+  if (!command.regressionEvidence && !command.nonDeterminismRationale) {
+    context.addIssue({ code: "custom", message: "regression evidence or an approved non-determinism rationale is required" });
+  }
+});
+
+/** Actor metadata retained when a governance-relevant activation attempt is blocked. */
+export const activationAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();
