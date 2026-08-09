@@ -3,6 +3,7 @@ import type { Writable } from "node:stream";
 import {
   activationAttemptContextSchema,
   activationCommandSchema,
+  activeRevisionCommandSchema,
   approvalAttemptContextSchema,
   approvalCommandSchema,
   captureCandidateCommandSchema,
@@ -256,12 +257,22 @@ export interface ActiveLesson extends CandidateLessonFields {
   activatedAt: string;
 }
 
+/** A previously active revision retained for lineage after its successor replaces it. */
+export interface SupersededLesson extends CandidateLessonFields {
+  state: "superseded";
+  reviewAssignment: Readonly<ReviewAssignment>;
+  approval: Readonly<ApprovalRecord>;
+  activatedAt: string;
+  supersededAt: string;
+  supersededByRevisionId: string;
+}
+
 export type CandidateLesson =
   | CapturedCandidateLesson
   | UnderReviewCandidateLesson
   | RejectedCandidateLesson;
 
-export type OperationalLesson = CandidateLesson | ApprovedLesson | ActiveLesson;
+export type OperationalLesson = CandidateLesson | ApprovedLesson | ActiveLesson | SupersededLesson;
 
 /** The append-only audit event emitted for a successful capture. */
 export interface CaptureLifecycleEvent {
@@ -335,6 +346,39 @@ export interface BlockedRevisionLifecycleEvent {
   actorKind: Actor["kind"];
   occurredAt: string;
   reason: "material revision contained no changed value";
+  outcome: "blocked";
+}
+
+/** Audit event for creating an under-review successor to an active revision. */
+export interface ActiveRevisionLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "under_review";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "active lesson revision submitted for human review";
+  predecessorRevisionId: string;
+  changeSummary: string;
+  reviewAssignment: Readonly<ReviewAssignment>;
+  outcome: "completed";
+}
+
+/** Audit event for an active revision attempt with no material change. */
+export interface BlockedActiveRevisionLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "active";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "active revision contained no changed value";
   outcome: "blocked";
 }
 
@@ -427,18 +471,48 @@ export interface BlockedActivationLifecycleEvent {
   outcome: "blocked";
 }
 
+/** Audit event covering both sides of one successful revision replacement. */
+export interface ReplacementLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  predecessorRevisionId: string;
+  predecessorFromState: "active";
+  predecessorToState: "superseded";
+  successorRevisionId: string;
+  successorFromState: "approved";
+  successorToState: "active";
+  fromState: "approved";
+  toState: "active";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "approved successor replaced active predecessor";
+  outcome: "completed";
+}
+
+/** Audit event emitted when successor activation or lineage blocks replacement. */
+export type BlockedReplacementLifecycleEvent = Omit<BlockedActivationLifecycleEvent, "reason"> & {
+  reason: "replacement activation gates were not satisfied";
+};
+
 export type LifecycleEvent =
   | CaptureLifecycleEvent
   | ReviewLifecycleEvent
   | BlockedReviewLifecycleEvent
   | RevisionLifecycleEvent
   | BlockedRevisionLifecycleEvent
+  | ActiveRevisionLifecycleEvent
+  | BlockedActiveRevisionLifecycleEvent
   | RejectionLifecycleEvent
   | BlockedRejectionLifecycleEvent
   | ApprovalLifecycleEvent
   | BlockedApprovalLifecycleEvent
   | ActivationLifecycleEvent
-  | BlockedActivationLifecycleEvent;
+  | BlockedActivationLifecycleEvent
+  | ReplacementLifecycleEvent
+  | BlockedReplacementLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -458,6 +532,12 @@ export interface RevisionSink {
   appendBlockedRevision(event: BlockedRevisionLifecycleEvent): void;
 }
 
+/** Durable boundary for creating an under-review successor while its predecessor stays active. */
+export interface ActiveRevisionSink {
+  appendActiveRevision(revision: UnderReviewCandidateLesson, event: ActiveRevisionLifecycleEvent): void;
+  appendBlockedActiveRevision(event: BlockedActiveRevisionLifecycleEvent): void;
+}
+
 export interface RejectionSink {
   appendRejection(revision: RejectedCandidateLesson, event: RejectionLifecycleEvent): void;
   appendBlockedRejection(event: BlockedRejectionLifecycleEvent): void;
@@ -474,6 +554,17 @@ export interface ActivationSink {
   appendBlockedActivation(event: BlockedActivationLifecycleEvent): void;
 }
 
+/** Durable boundary for committing both consumer-visible sides of a lesson replacement. */
+export interface ReplacementSink {
+  /** Atomically supersedes the predecessor, activates the successor, and appends the event. */
+  replaceActiveRevision(
+    predecessor: SupersededLesson,
+    successor: ActiveLesson,
+    event: ReplacementLifecycleEvent,
+  ): void;
+  appendBlockedReplacement(event: BlockedReplacementLifecycleEvent): void;
+}
+
 export interface SubmitForReviewCommand {
   actor: Actor;
   occurredAt: string;
@@ -484,19 +575,24 @@ export interface MaterialRevisionCommand {
   actor: Actor;
   occurredAt: string;
   changeSummary: string;
-  changes: Partial<
-    Pick<
+  changes: {
+    [Field in keyof Pick<
       CandidateLessonFields,
-      | "title"
-      | "failureMode"
-      | "evidenceSummary"
-      | "confidence"
-      | "recurrenceSignature"
-      | "invariant"
-      | "guidance"
-      | "owner"
-    >
-  >;
+      | "title" | "failureMode" | "evidenceSummary" | "confidence"
+      | "recurrenceSignature" | "invariant" | "guidance" | "owner"
+    >]?: CandidateLessonFields[Field] | undefined;
+  };
+}
+
+type DefinedMaterialChanges = Partial<Pick<
+  CandidateLessonFields,
+  | "title" | "failureMode" | "evidenceSummary" | "confidence"
+  | "recurrenceSignature" | "invariant" | "guidance" | "owner"
+>>;
+
+/** Material revision and accountable review assignment for an active lesson. */
+export interface ActiveRevisionCommand extends MaterialRevisionCommand {
+  assignment: ReviewAssignment;
 }
 
 /** A validation failure raised before the durable capture boundary is called. */
@@ -597,14 +693,8 @@ export function reviseCandidate(
   }
 
   const command = parsed.data;
-  const changedFields = Object.fromEntries(
-    Object.entries(command.changes).filter(([, value]) => value !== undefined),
-  ) as MaterialRevisionCommand["changes"];
-  const hasMaterialChange = Object.entries(changedFields).some(([field, value]) => {
-    const priorValue = candidate[field as keyof MaterialRevisionCommand["changes"]];
-    return JSON.stringify(value) !== JSON.stringify(priorValue);
-  });
-  if (!hasMaterialChange) {
+  const changedFields = materialChangesFrom(candidate, command.changes);
+  if (!changedFields) {
     const blockedEvent = deepFreeze({
       eventId: `${candidate.lessonId}:${candidate.revision}:revision-blocked:${command.occurredAt}`,
       lessonId: candidate.lessonId,
@@ -657,6 +747,41 @@ export function reviseCandidate(
 
   sink.appendRevision(revised, event);
   return revised;
+}
+
+/** Creates an under-review successor without changing the active predecessor. */
+export function reviseActiveLesson(
+  predecessor: ActiveLesson,
+  input: unknown,
+  sink: ActiveRevisionSink,
+): UnderReviewCandidateLesson {
+  const parsed = activeRevisionCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
+  }
+  const command: ActiveRevisionCommand = parsed.data;
+  const changedFields = materialChangesFrom(predecessor, command.changes);
+  if (!changedFields) {
+    const blockedEvent = deepFreeze({
+      eventId: `${predecessor.lessonId}:${predecessor.revision}:active-revision-blocked:${command.occurredAt}`,
+      lessonId: predecessor.lessonId,
+      fromState: "active" as const,
+      toState: "active" as const,
+      revision: predecessor.revision,
+      actor: command.actor.identity,
+      actorAuthority: command.actor.authority,
+      actorKind: command.actor.kind,
+      occurredAt: command.occurredAt,
+      reason: "active revision contained no changed value" as const,
+      outcome: "blocked" as const,
+    });
+    sink.appendBlockedActiveRevision(blockedEvent);
+    throw new CandidateTransitionError(blockedEvent.reason);
+  }
+  const successor = createActiveSuccessor(predecessor, command, changedFields);
+  const event = createActiveRevisionEvent(predecessor, command, successor.revision);
+  sink.appendActiveRevision(successor, event);
+  return successor;
 }
 
 /** Records a human rejection; withdrawal uses the same rejected state with its own disposition. */
@@ -910,6 +1035,39 @@ export function activateApprovedLesson(
   return active;
 }
 
+/** Replaces one active revision with its approved successor in a single durable operation. */
+export function replaceActiveLesson(
+  predecessor: ActiveLesson,
+  approvedSuccessor: ApprovedLesson,
+  input: unknown,
+  sink: ReplacementSink,
+): { predecessor: SupersededLesson; successor: ActiveLesson } {
+  let replacement: { predecessor: SupersededLesson; successor: ActiveLesson } | undefined;
+  activateApprovedLesson(approvedSuccessor, input, {
+    activateAsSoleRevision(successor, activationEvent) {
+      if (successor.lessonId !== predecessor.lessonId
+        || successor.predecessorRevisionId !== predecessor.revisionId) {
+        sink.appendBlockedReplacement(toBlockedReplacement(activationEvent));
+        throw new CandidateTransitionError("replacement successor does not descend from the active revision");
+      }
+      const superseded = deepFreeze({
+        ...predecessor,
+        state: "superseded" as const,
+        supersededAt: activationEvent.occurredAt,
+        supersededByRevisionId: successor.revisionId,
+      });
+      const event = createReplacementEvent(predecessor, successor, activationEvent);
+      sink.replaceActiveRevision(superseded, successor, event);
+      replacement = { predecessor: superseded, successor };
+    },
+    appendBlockedActivation(event) {
+      sink.appendBlockedReplacement(toBlockedReplacement(event));
+    },
+  });
+  if (!replacement) throw new CandidateTransitionError("replacement was not committed");
+  return replacement;
+}
+
 /** Returns guidance only for consumer-eligible revisions; candidates yield none. */
 export function selectConsumerGuidance(lesson: OperationalLesson): string | null {
   return lesson.state === "active" ? lesson.guidance : null;
@@ -918,6 +1076,106 @@ export function selectConsumerGuidance(lesson: OperationalLesson): string | null
 /** Writes Markdown as data without constructing interpreter source. */
 export function publishMarkdown(markdown: string, destination: Writable): void {
   destination.write(markdown);
+}
+
+function materialChangesFrom(
+  lesson: CandidateLessonFields,
+  changes: MaterialRevisionCommand["changes"],
+): DefinedMaterialChanges | null {
+  const changed = Object.fromEntries(Object.entries(changes).filter(([field, value]) =>
+    value !== undefined
+    && JSON.stringify(value) !== JSON.stringify(lesson[field as keyof MaterialRevisionCommand["changes"]]),
+  )) as DefinedMaterialChanges;
+  return Object.keys(changed).length > 0 ? changed : null;
+}
+
+function createActiveSuccessor(
+  predecessor: ActiveLesson,
+  command: ActiveRevisionCommand,
+  changes: DefinedMaterialChanges,
+): UnderReviewCandidateLesson {
+  const { reviewAssignment: _review, approval: _approval, activatedAt: _activated, ...prior } = predecessor;
+  const revision = predecessor.revision + 1;
+  return deepFreeze({
+    ...prior,
+    ...changes,
+    revision,
+    revisionId: `${predecessor.lessonId}:${revision}`,
+    state: "under_review" as const,
+    revisionCreatedAt: command.occurredAt,
+    revisionCreatedBy: command.actor.identity,
+    evidenceReferences: predecessor.evidenceReferences.map((reference) => ({ ...reference, supportedRevision: revision })),
+    predecessorRevisionId: predecessor.revisionId,
+    changeSummary: command.changeSummary,
+    reviewAssignment: command.assignment,
+  });
+}
+
+function createActiveRevisionEvent(
+  predecessor: ActiveLesson,
+  command: ActiveRevisionCommand,
+  revision: number,
+): ActiveRevisionLifecycleEvent {
+  return deepFreeze({
+    eventId: `${predecessor.lessonId}:${revision}:active-revision`,
+    lessonId: predecessor.lessonId,
+    fromState: "active" as const,
+    toState: "under_review" as const,
+    revision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: command.actor.kind,
+    occurredAt: command.occurredAt,
+    reason: "active lesson revision submitted for human review" as const,
+    predecessorRevisionId: predecessor.revisionId,
+    changeSummary: command.changeSummary,
+    reviewAssignment: command.assignment,
+    outcome: "completed" as const,
+  });
+}
+
+function createReplacementEvent(
+  predecessor: ActiveLesson,
+  successor: ActiveLesson,
+  activation: ActivationLifecycleEvent,
+): ReplacementLifecycleEvent {
+  return deepFreeze({
+    eventId: `${predecessor.lessonId}:${predecessor.revision}->${successor.revision}:replaced`,
+    lessonId: predecessor.lessonId,
+    predecessorRevisionId: predecessor.revisionId,
+    predecessorFromState: "active" as const,
+    predecessorToState: "superseded" as const,
+    successorRevisionId: successor.revisionId,
+    successorFromState: "approved" as const,
+    successorToState: "active" as const,
+    fromState: "approved" as const,
+    toState: "active" as const,
+    revision: successor.revision,
+    actor: activation.actor,
+    actorAuthority: activation.actorAuthority,
+    actorKind: activation.actorKind,
+    occurredAt: activation.occurredAt,
+    reason: "approved successor replaced active predecessor" as const,
+    outcome: "completed" as const,
+  });
+}
+
+function toBlockedReplacement(
+  event: ActivationLifecycleEvent | BlockedActivationLifecycleEvent,
+): BlockedReplacementLifecycleEvent {
+  return deepFreeze({
+    eventId: `${event.lessonId}:${event.revision}:replacement-blocked:${event.occurredAt}`,
+    lessonId: event.lessonId,
+    fromState: "approved" as const,
+    toState: "approved" as const,
+    revision: event.revision,
+    actor: event.actor,
+    actorAuthority: event.actorAuthority,
+    actorKind: event.actorKind,
+    occurredAt: event.occurredAt,
+    reason: "replacement activation gates were not satisfied" as const,
+    outcome: "blocked" as const,
+  });
 }
 
 function createCandidate(

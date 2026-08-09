@@ -147,6 +147,25 @@ export const materialRevisionCommandSchema = z
   })
   .strict();
 
+/** Runtime schema for revising an active lesson directly into accountable review. */
+export const activeRevisionCommandSchema = z
+  .object({
+    actor,
+    occurredAt: isoInstant,
+    changeSummary: sanitizedText,
+    changes: materialChanges,
+    assignment: reviewAssignment,
+  })
+  .strict()
+  .superRefine((command, context) => {
+    if (command.assignment.assignedBy !== command.actor.identity) {
+      context.addIssue({ code: "custom", message: "assignment provenance must name the revising actor" });
+    }
+    if (command.assignment.assignedAt !== command.occurredAt) {
+      context.addIssue({ code: "custom", message: "assignment time must match the active revision transition" });
+    }
+  });
+
 /** Runtime schema for a human rejection or owner-recorded withdrawal. */
 export const rejectionCommandSchema = z
   .object({

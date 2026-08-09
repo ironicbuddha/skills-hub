@@ -14,6 +14,8 @@ import {
   CandidateTransitionError,
   CandidateValidationError,
   publishMarkdown,
+  replaceActiveLesson,
+  reviseActiveLesson,
   reviseCandidate,
   rejectCandidate,
   submitCandidateForReview,
@@ -30,9 +32,12 @@ import {
   type LifecycleEvent,
   type ReviewAssignment,
   type ReviewSink,
+  type ActiveRevisionSink,
   type RevisionSink,
   type RejectedCandidateLesson,
   type RejectionSink,
+  type ReplacementSink,
+  type SupersededLesson,
 } from "../src/operational-lessons.ts";
 
 function captureSink(
@@ -53,6 +58,10 @@ function captureSink(
       events.push(event);
     },
   };
+}
+
+function lifecycleOutcome(event: LifecycleEvent | undefined) {
+  return event && "outcome" in event ? event.outcome : undefined;
 }
 
 const command = (): CaptureCandidateCommand => ({
@@ -195,6 +204,72 @@ const activationCommand = (): ActivationCommand => ({
   regressionEvidence: ["regression-safe-publication"],
   enforcementWaivers: [],
 });
+
+function activeCandidate(): ActiveLesson {
+  const approved = approvedCandidate({
+    evidenceReferences: [
+      ...approvalCommand().evidenceReferences,
+      {
+        evidenceId: "regression-safe-publication",
+        kind: "regression",
+        supportedRevision: 1,
+        sanitizedSummary: "The safe publication regression passed in the deployment environment.",
+        classification: "internal",
+        accessBoundary: "lesson-reviewers",
+        observedAt: "2026-08-09T10:25:00.000Z",
+        collector: "deployment-service",
+        immutableLocator: "sha256:regression-safe-publication",
+        retention: "365d",
+      },
+    ],
+  });
+  return activateApprovedLesson(approved, activationCommand(), {
+    activateAsSoleRevision() {},
+    appendBlockedActivation() {},
+  });
+}
+
+function reviewedSuccessor(predecessor = activeCandidate()) {
+  return reviseActiveLesson(predecessor, {
+    actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
+    occurredAt: "2026-08-09T11:10:00.000Z",
+    changeSummary: "Clarify that every publication boundary must preserve literal bytes.",
+    changes: { guidance: "Pass Markdown through a byte-preserving, data-safe input boundary." },
+    assignment: { ...reviewAssignment(), assignedAt: "2026-08-09T11:10:00.000Z" },
+  }, { appendActiveRevision() {}, appendBlockedActiveRevision() {} });
+}
+
+function approvedSuccessor(predecessor = activeCandidate()) {
+  const successor = reviewedSuccessor(predecessor);
+  const priorApproval = approvalCommand();
+  return approveCandidate(successor, {
+    ...priorApproval,
+    occurredAt: "2026-08-09T11:30:00.000Z",
+    revisionId: successor.revisionId,
+    evidenceReferences: [
+      ...priorApproval.evidenceReferences.map((reference) => ({
+        ...reference,
+        supportedRevision: successor.revision,
+      })),
+      {
+        evidenceId: "regression-safe-publication-v2",
+        kind: "regression" as const,
+        supportedRevision: successor.revision,
+        sanitizedSummary: "The revised safe publication regression passed.",
+        classification: "internal",
+        accessBoundary: "lesson-reviewers",
+        observedAt: "2026-08-09T11:25:00.000Z",
+        collector: "deployment-service",
+        immutableLocator: "sha256:regression-safe-publication-v2",
+        retention: "365d",
+      },
+    ],
+    enforcementLinks: priorApproval.enforcementLinks.map((link) => ({
+      ...link,
+      implementedRevisionId: successor.revisionId,
+    })),
+  }, { appendApproval() {}, appendBlockedApproval() {} });
+}
 
 test("capture creates immutable revision 1 and an append-only event", () => {
   const revisions: CandidateLesson[] = [];
@@ -513,6 +588,42 @@ test("a revision with no changed value is blocked and audited", () => {
   assert.equal(blockedEvent.toState, "under_review");
 });
 
+test("revising an active lesson creates an independently reviewed successor while the predecessor stays active", () => {
+  const predecessor = activeCandidate();
+  const successors: CandidateLesson[] = [];
+  const events: LifecycleEvent[] = [];
+  const sink: ActiveRevisionSink = {
+    appendActiveRevision(revision, event) {
+      successors.push(revision);
+      events.push(event);
+    },
+    appendBlockedActiveRevision(event) {
+      events.push(event);
+    },
+  };
+
+  const successor = reviseActiveLesson(predecessor, {
+    actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
+    occurredAt: "2026-08-09T11:10:00.000Z",
+    changeSummary: "Clarify that every publication boundary must preserve literal bytes.",
+    changes: { guidance: "Pass Markdown through a byte-preserving, data-safe input boundary." },
+    assignment: {
+      ...reviewAssignment(),
+      assignedAt: "2026-08-09T11:10:00.000Z",
+    },
+  }, sink);
+
+  assert.equal(successor.state, "under_review");
+  assert.equal(successor.revision, 2);
+  assert.equal(successor.predecessorRevisionId, predecessor.revisionId);
+  assert.equal(successor.reviewAssignment.status, "assigned");
+  assert.deepEqual(successors, [successor]);
+  assert.equal(events[0]?.fromState, "active");
+  assert.equal(events[0]?.toState, "under_review");
+  assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
+  assert.equal(selectConsumerGuidance(successor), null);
+});
+
 test.each([
   ["rejected", "The proposed invariant is broader than the evidence supports."],
   ["withdrawn", "The owner withdrew the candidate pending new evidence."],
@@ -555,7 +666,7 @@ test.each([
   assert.equal(rejected.dispositionReason, reason);
   assert.deepEqual(revisions, [rejected]);
   assert.equal(events[0]?.toState, "rejected");
-  assert.equal(events[0]?.outcome, "completed");
+  assert.equal(lifecycleOutcome(events[0]), "completed");
   assert.equal(Object.isFrozen(rejected), true);
   assert.equal(selectConsumerGuidance(rejected), null);
 });
@@ -701,7 +812,7 @@ test.each([
   }), CandidateTransitionError);
   assert.equal(events.length, 1);
   assert.equal(events[0]?.toState, "under_review");
-  assert.equal(events[0]?.outcome, "blocked");
+  assert.equal(lifecycleOutcome(events[0]), "blocked");
 });
 
 test("a severe first occurrence can replace recurrence evidence only with explicit justification", () => {
@@ -795,7 +906,7 @@ test("an approved exact revision activates only after regression, conflict, and 
   assert.equal(active.activatedAt, "2026-08-09T11:00:00.000Z");
   assert.deepEqual(revisions, [active]);
   assert.equal(events[0]?.toState, "active");
-  assert.equal(events[0]?.outcome, "completed");
+  assert.equal(lifecycleOutcome(events[0]), "completed");
   assert.equal(selectConsumerGuidance(active), approved.guidance);
 });
 
@@ -813,7 +924,7 @@ test.each([
   assert.equal(approved.state, "approved");
   assert.equal(events[0]?.fromState, "approved");
   assert.equal(events[0]?.toState, "approved");
-  assert.equal(events[0]?.outcome, "blocked");
+  assert.equal(lifecycleOutcome(events[0]), "blocked");
 });
 
 test("an Enforcement Link does not satisfy activation unless its deployment is ready", () => {
@@ -885,6 +996,88 @@ test("an open blocking conflict prevents activation", () => {
     activateAsSoleRevision() { assert.fail("an open conflict must block activation"); },
     appendBlockedActivation() {},
   }), CandidateTransitionError);
+});
+
+test("replacement atomically activates the approved successor and supersedes its active predecessor", () => {
+  const predecessor = activeCandidate();
+  const successor = approvedSuccessor(predecessor);
+  let visible: (ActiveLesson | SupersededLesson)[] = [predecessor];
+  const readConsumerGuidance = () => visible.flatMap((lesson) => {
+    const guidance = selectConsumerGuidance(lesson);
+    return guidance === null ? [] : [guidance];
+  });
+  assert.deepEqual(readConsumerGuidance(), [predecessor.guidance]);
+  const sink: ReplacementSink = {
+    replaceActiveRevision(superseded, active, event) {
+      assert.deepEqual(visible, [predecessor]);
+      visible = [superseded, active];
+      assert.equal(visible.filter(({ state }) => state === "active").length, 1);
+      assert.deepEqual(readConsumerGuidance(), [successor.guidance]);
+      assert.equal(event.predecessorRevisionId, predecessor.revisionId);
+      assert.equal(event.successorRevisionId, successor.revisionId);
+    },
+    appendBlockedReplacement() {},
+  };
+
+  const replacement = replaceActiveLesson(predecessor, successor, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: successor.revisionId,
+    regressionEvidence: ["regression-safe-publication-v2"],
+  }, sink);
+
+  assert.equal(replacement.predecessor.state, "superseded");
+  assert.equal(replacement.predecessor.supersededByRevisionId, successor.revisionId);
+  assert.equal(replacement.successor.state, "active");
+  assert.equal(selectConsumerGuidance(replacement.predecessor), null);
+  assert.equal(selectConsumerGuidance(replacement.successor), successor.guidance);
+});
+
+test("a failure before the replacement commit leaves the predecessor active", () => {
+  const predecessor = activeCandidate();
+  const successor = approvedSuccessor(predecessor);
+  let commitCalled = false;
+
+  assert.throws(() => replaceActiveLesson(predecessor, successor, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: successor.revisionId,
+    regressionEvidence: [],
+  }, {
+    replaceActiveRevision() { commitCalled = true; },
+    appendBlockedReplacement() {},
+  }), CandidateTransitionError);
+
+  assert.equal(commitCalled, false);
+  assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
+  assert.equal(selectConsumerGuidance(successor), null);
+});
+
+test("a failure inside the replacement commit cannot mutate either input revision", () => {
+  const predecessor = activeCandidate();
+  const successor = approvedSuccessor(predecessor);
+  const commitFailure = new Error("injected commit failure");
+  let visible: (ActiveLesson | SupersededLesson)[] = [predecessor];
+
+  assert.throws(() => replaceActiveLesson(predecessor, successor, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: successor.revisionId,
+    regressionEvidence: ["regression-safe-publication-v2"],
+  }, {
+    replaceActiveRevision(superseded, active) {
+      const uncommitted = [superseded, active];
+      assert.equal(uncommitted.filter(({ state }) => state === "active").length, 1);
+      throw commitFailure;
+    },
+    appendBlockedReplacement() {},
+  }), (error) => error === commitFailure);
+
+  assert.deepEqual(visible, [predecessor]);
+  assert.equal(predecessor.state, "active");
+  assert.equal(successor.state, "approved");
+  assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
+  assert.equal(selectConsumerGuidance(successor), null);
 });
 
 test("Markdown is published as inert, byte-preserved data", () => {
