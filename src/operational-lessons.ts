@@ -11,6 +11,7 @@ import {
   rejectionCommandSchema,
   reviewAttemptContextSchema,
   reviewSubmissionCommandSchema,
+  terminalDispositionCommandSchema,
 } from "./operational-lessons-schema.ts";
 
 /** A fact category permitted at the sanitized capture boundary. */
@@ -255,6 +256,7 @@ export interface ActiveLesson extends CandidateLessonFields {
   reviewAssignment: Readonly<ReviewAssignment>;
   approval: Readonly<ApprovalRecord>;
   activatedAt: string;
+  replaces?: readonly Readonly<{ lessonId: string; revisionId: string }>[];
 }
 
 /** A previously active revision retained for lineage after its successor replaces it. */
@@ -264,7 +266,24 @@ export interface SupersededLesson extends CandidateLessonFields {
   approval: Readonly<ApprovalRecord>;
   activatedAt: string;
   supersededAt: string;
+  supersededByLessonId: string;
   supersededByRevisionId: string;
+}
+
+/** An active replacement carrying the reverse side of cross-lesson lineage. */
+export interface ActiveReplacementLesson extends ActiveLesson {
+  replaces: readonly Readonly<{ lessonId: string; revisionId: string }>[];
+}
+
+/** Active guidance ended by a human without a replacement. */
+export interface RetiredLesson extends CandidateLessonFields {
+  state: "retired";
+  reviewAssignment: Readonly<ReviewAssignment>;
+  approval: Readonly<ApprovalRecord>;
+  activatedAt: string;
+  retiredAt: string;
+  retiredBy: string;
+  retirementReason: string;
 }
 
 export type CandidateLesson =
@@ -272,7 +291,7 @@ export type CandidateLesson =
   | UnderReviewCandidateLesson
   | RejectedCandidateLesson;
 
-export type OperationalLesson = CandidateLesson | ApprovedLesson | ActiveLesson | SupersededLesson;
+export type OperationalLesson = CandidateLesson | ApprovedLesson | ActiveLesson | SupersededLesson | RetiredLesson;
 
 /** The append-only audit event emitted for a successful capture. */
 export interface CaptureLifecycleEvent {
@@ -492,6 +511,40 @@ export interface ReplacementLifecycleEvent {
   outcome: "completed";
 }
 
+/** Audit event for ending one lesson in favor of a separately active lesson. */
+export interface CrossLessonSupersessionLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "superseded";
+  revision: number;
+  replacementLessonId: string;
+  replacementRevisionId: string;
+  actor: string;
+  actorAuthority: string;
+  actorKind: "human";
+  occurredAt: string;
+  reason: "active lesson superseded by cross-lesson replacement";
+  dispositionReason: string;
+  outcome: "completed";
+}
+
+/** Audit event for ending active guidance without a replacement. */
+export interface RetirementLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "retired";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: "human";
+  occurredAt: string;
+  reason: "active lesson retired without replacement";
+  dispositionReason: string;
+  outcome: "completed";
+}
+
 /** Audit event emitted when successor activation or lineage blocks replacement. */
 export type BlockedReplacementLifecycleEvent = Omit<BlockedActivationLifecycleEvent, "reason"> & {
   reason: "replacement activation gates were not satisfied";
@@ -512,7 +565,9 @@ export type LifecycleEvent =
   | ActivationLifecycleEvent
   | BlockedActivationLifecycleEvent
   | ReplacementLifecycleEvent
-  | BlockedReplacementLifecycleEvent;
+  | BlockedReplacementLifecycleEvent
+  | CrossLessonSupersessionLifecycleEvent
+  | RetirementLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -563,6 +618,20 @@ export interface ReplacementSink {
     event: ReplacementLifecycleEvent,
   ): void;
   appendBlockedReplacement(event: BlockedReplacementLifecycleEvent): void;
+}
+
+/** Durable boundary preserving both historical revisions and both lineage directions. */
+export interface CrossLessonSupersessionSink {
+  supersedeWithActiveReplacement(
+    superseded: SupersededLesson,
+    replacement: ActiveReplacementLesson,
+    event: CrossLessonSupersessionLifecycleEvent,
+  ): void;
+}
+
+/** Durable boundary appending a retired revision and its Lifecycle Event. */
+export interface RetirementSink {
+  retireActiveRevision(retired: RetiredLesson, event: RetirementLifecycleEvent): void;
 }
 
 export interface SubmitForReviewCommand {
@@ -1054,6 +1123,7 @@ export function replaceActiveLesson(
         ...predecessor,
         state: "superseded" as const,
         supersededAt: activationEvent.occurredAt,
+        supersededByLessonId: successor.lessonId,
         supersededByRevisionId: successor.revisionId,
       });
       const event = createReplacementEvent(predecessor, successor, activationEvent);
@@ -1068,9 +1138,97 @@ export function replaceActiveLesson(
   return replacement;
 }
 
+/** Ends active guidance by linking it atomically to an approved, active replacement lesson. */
+export function supersedeActiveLessonAcrossLessons(
+  predecessor: ActiveLesson,
+  replacement: OperationalLesson,
+  input: unknown,
+  sink: CrossLessonSupersessionSink,
+): { superseded: SupersededLesson; replacement: ActiveReplacementLesson } {
+  const command = parseTerminalDispositionCommand(input);
+  if (replacement.state !== "active"
+    || replacement.lessonId === predecessor.lessonId
+    || replacement.approval.revisionId !== replacement.revisionId) {
+    throw new CandidateTransitionError("cross-lesson replacement must be an approved active revision");
+  }
+
+  const superseded = deepFreeze({
+    ...predecessor,
+    state: "superseded" as const,
+    supersededAt: command.occurredAt,
+    supersededByLessonId: replacement.lessonId,
+    supersededByRevisionId: replacement.revisionId,
+  });
+  const activeReplacement = deepFreeze({
+    ...replacement,
+    replaces: [
+      ...(replacement.replaces ?? []),
+      { lessonId: predecessor.lessonId, revisionId: predecessor.revisionId },
+    ],
+  });
+  const event = deepFreeze({
+    eventId: `${predecessor.lessonId}:${predecessor.revision}:superseded:${command.occurredAt}`,
+    lessonId: predecessor.lessonId,
+    fromState: "active" as const,
+    toState: "superseded" as const,
+    revision: predecessor.revision,
+    replacementLessonId: replacement.lessonId,
+    replacementRevisionId: replacement.revisionId,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: "human" as const,
+    occurredAt: command.occurredAt,
+    reason: "active lesson superseded by cross-lesson replacement" as const,
+    dispositionReason: command.reason,
+    outcome: "completed" as const,
+  });
+  sink.supersedeWithActiveReplacement(superseded, activeReplacement, event);
+  return { superseded, replacement: activeReplacement };
+}
+
+/** Ends active guidance by recording a human retirement with no replacement. */
+export function retireActiveLesson(
+  active: ActiveLesson,
+  input: unknown,
+  sink: RetirementSink,
+): RetiredLesson {
+  const command = parseTerminalDispositionCommand(input);
+  const retired = deepFreeze({
+    ...active,
+    state: "retired" as const,
+    retiredAt: command.occurredAt,
+    retiredBy: command.actor.identity,
+    retirementReason: command.reason,
+  });
+  const event = deepFreeze({
+    eventId: `${active.lessonId}:${active.revision}:retired`,
+    lessonId: active.lessonId,
+    fromState: "active" as const,
+    toState: "retired" as const,
+    revision: active.revision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: "human" as const,
+    occurredAt: command.occurredAt,
+    reason: "active lesson retired without replacement" as const,
+    dispositionReason: command.reason,
+    outcome: "completed" as const,
+  });
+  sink.retireActiveRevision(retired, event);
+  return retired;
+}
+
 /** Returns guidance only for consumer-eligible revisions; candidates yield none. */
 export function selectConsumerGuidance(lesson: OperationalLesson): string | null {
   return lesson.state === "active" ? lesson.guidance : null;
+}
+
+function parseTerminalDispositionCommand(input: unknown) {
+  const parsed = terminalDispositionCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
+  }
+  return parsed.data;
 }
 
 /** Writes Markdown as data without constructing interpreter source. */

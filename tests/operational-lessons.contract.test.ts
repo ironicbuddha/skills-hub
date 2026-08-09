@@ -15,11 +15,13 @@ import {
   CandidateValidationError,
   publishMarkdown,
   replaceActiveLesson,
+  retireActiveLesson,
   reviseActiveLesson,
   reviseCandidate,
   rejectCandidate,
   submitCandidateForReview,
   selectConsumerGuidance,
+  supersedeActiveLessonAcrossLessons,
   type CaptureCandidateCommand,
   type CaptureSink,
   type ApprovalCommand,
@@ -30,6 +32,7 @@ import {
   type ActiveLesson,
   type CandidateLesson,
   type LifecycleEvent,
+  type OperationalLesson,
   type ReviewAssignment,
   type ReviewSink,
   type ActiveRevisionSink,
@@ -37,7 +40,10 @@ import {
   type RejectedCandidateLesson,
   type RejectionSink,
   type ReplacementSink,
+  type RetirementSink,
   type SupersededLesson,
+  type CrossLessonSupersessionSink,
+  type RetiredLesson,
 } from "../src/operational-lessons.ts";
 
 function captureSink(
@@ -1078,6 +1084,110 @@ test("a failure inside the replacement commit cannot mutate either input revisio
   assert.equal(successor.state, "approved");
   assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
   assert.equal(selectConsumerGuidance(successor), null);
+});
+
+test("cross-lesson supersession atomically records bidirectional lineage to an active replacement", () => {
+  const predecessor = activeCandidate();
+  const replacement = {
+    ...activeCandidate(),
+    lessonId: "lesson_safe_content_transport",
+    revisionId: "lesson_safe_content_transport:1",
+    title: "Transport arbitrary content through data-only boundaries",
+    guidance: "Use a data-only transport for arbitrary content.",
+    approval: {
+      ...activeCandidate().approval,
+      revisionId: "lesson_safe_content_transport:1",
+    },
+  } satisfies ActiveLesson;
+  const revisions: (ActiveLesson | SupersededLesson)[] = [predecessor, replacement];
+  const events: LifecycleEvent[] = [];
+  const sink: CrossLessonSupersessionSink = {
+    supersedeWithActiveReplacement(superseded, activeReplacement, event) {
+      revisions.push(superseded, activeReplacement);
+      events.push(event);
+    },
+  };
+
+  const outcome = supersedeActiveLessonAcrossLessons(predecessor, replacement, {
+    actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
+    occurredAt: "2026-08-09T13:00:00.000Z",
+    reason: "The replacement generalizes the publication-specific guidance.",
+  }, sink);
+
+  assert.equal(outcome.superseded.supersededByLessonId, replacement.lessonId);
+  assert.equal(outcome.superseded.supersededByRevisionId, replacement.revisionId);
+  assert.deepEqual(outcome.replacement.replaces, [{
+    lessonId: predecessor.lessonId,
+    revisionId: predecessor.revisionId,
+  }]);
+  const queriedReplacement: OperationalLesson = outcome.replacement;
+  assert.deepEqual(queriedReplacement.state === "active" ? queriedReplacement.replaces : undefined,
+    outcome.replacement.replaces);
+  assert.equal(outcome.replacement.state, "active");
+  assert.equal(selectConsumerGuidance(outcome.superseded), null);
+  assert.equal(selectConsumerGuidance(outcome.replacement), replacement.guidance);
+  assert.deepEqual(revisions.slice(0, 2), [predecessor, replacement]);
+  assert.equal(events[0]?.reason, "active lesson superseded by cross-lesson replacement");
+});
+
+test("cross-lesson supersession rejects a replacement that is not active", () => {
+  const predecessor = activeCandidate();
+  const replacement = approvedCandidate();
+  let committed = false;
+
+  assert.throws(() => supersedeActiveLessonAcrossLessons(predecessor, replacement, {
+    actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
+    occurredAt: "2026-08-09T13:00:00.000Z",
+    reason: "The replacement generalizes the publication-specific guidance.",
+  }, {
+    supersedeWithActiveReplacement() { committed = true; },
+  }), CandidateTransitionError);
+
+  assert.equal(committed, false);
+  assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
+});
+
+test("retirement records its human disposition without naming a replacement", () => {
+  const active = activeCandidate();
+  const revisions: (ActiveLesson | RetiredLesson)[] = [active];
+  const events: LifecycleEvent[] = [];
+  const sink: RetirementSink = {
+    retireActiveRevision(retired, event) {
+      revisions.push(retired);
+      events.push(event);
+    },
+  };
+
+  const retired = retireActiveLesson(active, {
+    actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
+    occurredAt: "2026-08-09T14:00:00.000Z",
+    reason: "The guidance no longer applies to supported publication paths.",
+  }, sink);
+
+  assert.equal(retired.state, "retired");
+  assert.equal(retired.retiredBy, "lesson-owner");
+  assert.equal(retired.retiredAt, "2026-08-09T14:00:00.000Z");
+  assert.equal(retired.retirementReason, "The guidance no longer applies to supported publication paths.");
+  assert.equal("supersededByRevisionId" in retired, false);
+  assert.equal(selectConsumerGuidance(retired), null);
+  assert.deepEqual(revisions[0], active);
+  assert.equal(events[0]?.reason, "active lesson retired without replacement");
+});
+
+test("retirement requires a human actor", () => {
+  const active = activeCandidate();
+  let committed = false;
+
+  assert.throws(() => retireActiveLesson(active, {
+    actor: { identity: "cleanup-service", authority: "lesson-retirer", kind: "service" },
+    occurredAt: "2026-08-09T14:00:00.000Z",
+    reason: "The guidance no longer applies to supported publication paths.",
+  }, {
+    retireActiveRevision() { committed = true; },
+  }), CandidateValidationError);
+
+  assert.equal(committed, false);
+  assert.equal(selectConsumerGuidance(active), active.guidance);
 });
 
 test("Markdown is published as inert, byte-preserved data", () => {

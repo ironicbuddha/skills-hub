@@ -299,3 +299,10 @@ export const activationCommandSchema = z.object({
 
 /** Actor metadata retained when a governance-relevant activation attempt is blocked. */
 export const activationAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();
+
+/** Runtime schema for a human decision that ends active guidance. */
+export const terminalDispositionCommandSchema = z.object({
+  actor: actor.extend({ kind: z.literal("human") }),
+  occurredAt: isoInstant,
+  reason: sanitizedText,
+}).strict();
