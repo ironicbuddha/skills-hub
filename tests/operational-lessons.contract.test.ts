@@ -10,10 +10,12 @@ import { test } from "@jest/globals";
 import {
   approveCandidate,
   activateApprovedLesson,
+  completeActiveLessonReview,
   captureCandidate,
   CandidateTransitionError,
   CandidateValidationError,
   publishMarkdown,
+  evaluateActiveLessonDeadlines,
   replaceActiveLesson,
   retireActiveLesson,
   reviseActiveLesson,
@@ -41,6 +43,8 @@ import {
   type RejectionSink,
   type ReplacementSink,
   type RetirementSink,
+  type ActiveLessonDeadlineSink,
+  type ActiveLessonReviewSink,
   type SupersededLesson,
   type CrossLessonSupersessionSink,
   type RetiredLesson,
@@ -1291,6 +1295,156 @@ test("retirement requires a human actor", () => {
 
   assert.equal(committed, false);
   assert.equal(selectConsumerGuidance(active), active.guidance);
+});
+
+test("an overdue review alerts without changing active lesson semantics", () => {
+  const active = activeCandidate();
+  const events: LifecycleEvent[] = [];
+  const sink: ActiveLessonDeadlineSink = {
+    applyDeadlineOutcome(lesson, deadlineEvents) {
+      assert.equal(lesson, active);
+      events.push(...deadlineEvents);
+    },
+  };
+
+  const outcome = evaluateActiveLessonDeadlines(active, {
+    actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
+    occurredAt: "2026-09-10T10:30:00.000Z",
+  }, sink);
+
+  assert.equal(outcome.lesson, active);
+  assert.equal(outcome.overdueReview, true);
+  assert.equal(selectConsumerGuidance(outcome.lesson), active.guidance);
+  assert.equal(events[0]?.reason, "active lesson review is overdue");
+  assert.equal(events[0]?.toState, "active");
+});
+
+test("a completed active lesson review records accountability, evidence, and its next deadline", () => {
+  const active = activeCandidate();
+  const events: LifecycleEvent[] = [];
+  const sink: ActiveLessonReviewSink = {
+    appendCompletedReview(_lesson, event) { events.push(event); },
+  };
+
+  const reviewed = completeActiveLessonReview(active, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-09-10T11:00:00.000Z",
+    outcome: "confirmed",
+    evidenceConsidered: ["evidence-42", "regression-safe-publication"],
+    nextReviewAt: "2026-10-10T11:00:00.000Z",
+  }, sink);
+
+  assert.equal(reviewed, active);
+  assert.equal(events[0]?.reason, "active lesson review completed");
+  assert.equal(events[0]?.actor, "human-reviewer");
+  assert.equal(events[0]?.occurredAt, "2026-09-10T11:00:00.000Z");
+  assert.deepEqual("evidenceConsidered" in events[0]! ? events[0].evidenceConsidered : undefined,
+    ["evidence-42", "regression-safe-publication"]);
+  assert.equal("nextReviewAt" in events[0]! ? events[0].nextReviewAt : undefined,
+    "2026-10-10T11:00:00.000Z");
+  assert.equal(selectConsumerGuidance(reviewed), active.guidance);
+});
+
+test("a completed review establishes the operative next review deadline", () => {
+  const active = activeCandidate();
+  let completedReview: Extract<LifecycleEvent, { reason: "active lesson review completed" }> | undefined;
+  completeActiveLessonReview(active, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-09-10T11:00:00.000Z",
+    outcome: "confirmed",
+    evidenceConsidered: ["evidence-42"],
+    nextReviewAt: "2026-10-10T11:00:00.000Z",
+  }, {
+    appendCompletedReview(_lesson, event) { completedReview = event; },
+  });
+
+  const outcome = evaluateActiveLessonDeadlines(active, {
+    actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
+    occurredAt: "2026-09-11T11:00:00.000Z",
+  }, { applyDeadlineOutcome() {} }, completedReview);
+
+  assert.equal(outcome.overdueReview, false);
+});
+
+test("a future completed review cannot alter an earlier deadline evaluation", () => {
+  const active = activeCandidate();
+  let completedReview: Extract<LifecycleEvent, { reason: "active lesson review completed" }> | undefined;
+  completeActiveLessonReview(active, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-09-10T11:00:00.000Z",
+    outcome: "confirmed",
+    evidenceConsidered: ["evidence-42"],
+    nextReviewAt: "2026-10-10T11:00:00.000Z",
+  }, { appendCompletedReview(_lesson, event) { completedReview = event; } });
+
+  assert.throws(() => evaluateActiveLessonDeadlines(active, {
+    actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
+    occurredAt: "2026-09-09T11:00:00.000Z",
+  }, { applyDeadlineOutcome() { assert.fail("future review must not affect current deadlines"); } }, completedReview),
+  CandidateTransitionError);
+});
+
+test("separate overdue alerts have distinct audit identities", () => {
+  const active = activeCandidate();
+  const eventIds: string[] = [];
+  const sink: ActiveLessonDeadlineSink = {
+    applyDeadlineOutcome(_lesson, events) { eventIds.push(...events.map(({ eventId }) => eventId)); },
+  };
+  for (const occurredAt of ["2026-09-10T10:30:00.000Z", "2026-09-11T10:30:00.000Z"]) {
+    evaluateActiveLessonDeadlines(active, {
+      actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
+      occurredAt,
+    }, sink);
+  }
+
+  assert.notEqual(eventIds[0], eventIds[1]);
+});
+
+test("an active lesson review rejects evidence that is not durably bound to the revision", () => {
+  const active = activeCandidate();
+  assert.throws(() => completeActiveLessonReview(active, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-09-10T11:00:00.000Z",
+    outcome: "confirmed",
+    evidenceConsidered: ["missing-evidence"],
+    nextReviewAt: "2026-10-10T11:00:00.000Z",
+  }, {
+    appendCompletedReview() { assert.fail("unbound review evidence must not be recorded"); },
+  }), CandidateTransitionError);
+});
+
+test("passing hard expiry atomically retires guidance as expired", () => {
+  const active = activeCandidate();
+  const events: LifecycleEvent[] = [];
+  const sink: ActiveLessonDeadlineSink = {
+    applyDeadlineOutcome(_lesson, deadlineEvents) { events.push(...deadlineEvents); },
+  };
+
+  const outcome = evaluateActiveLessonDeadlines(active, {
+    actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
+    occurredAt: "2026-11-09T10:30:00.000Z",
+  }, sink);
+
+  assert.equal(outcome.lesson.state, "retired");
+  assert.equal(outcome.lesson.retirementReason, "expired");
+  assert.equal(outcome.lesson.retiredBy, "lesson-scheduler");
+  assert.equal(selectConsumerGuidance(outcome.lesson), null);
+  const expiryEvent = events.find((event) => event.reason === "active lesson approval expired");
+  assert.equal(expiryEvent?.toState, "retired");
+  assert.deepEqual(expiryEvent && "unreconciledEnforcementLinks" in expiryEvent
+    ? expiryEvent.unreconciledEnforcementLinks
+    : undefined, ["control-safe-publication-test"]);
+});
+
+test("approval without hard expiry preserves its accepted rationale", () => {
+  const approved = approvedCandidate({
+    expiresAt: undefined,
+    expiryRationale: "This invariant is durable; quarterly review remains mandatory.",
+  });
+
+  assert.equal(approved.approval.expiresAt, undefined);
+  assert.equal(approved.approval.expiryRationale,
+    "This invariant is durable; quarterly review remains mandatory.");
 });
 
 test("Markdown is published as inert, byte-preserved data", () => {

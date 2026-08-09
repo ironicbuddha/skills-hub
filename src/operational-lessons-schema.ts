@@ -344,3 +344,28 @@ export const terminalDispositionCommandSchema = z.object({
   occurredAt: isoInstant,
   reason: sanitizedText,
 }).strict();
+
+/** Runtime schema for checking review and expiry deadlines on active guidance. */
+export const activeLessonDeadlineCommandSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+}).strict();
+
+/** Runtime schema for an accountable periodic review of active guidance. */
+export const activeLessonReviewCommandSchema = z.object({
+  actor: actor.extend({ kind: z.literal("human") }),
+  occurredAt: isoInstant,
+  outcome: sanitizedText,
+  evidenceConsidered: z.array(ordinaryText).min(1),
+  nextReviewAt: isoInstant.optional(),
+  expiresAt: isoInstant.optional(),
+}).strict().superRefine((command, context) => {
+  if (!command.nextReviewAt && !command.expiresAt) {
+    context.addIssue({ code: "custom", message: "a completed review requires a next review or expiry" });
+  }
+  for (const deadline of [command.nextReviewAt, command.expiresAt]) {
+    if (deadline && Date.parse(deadline) <= Date.parse(command.occurredAt)) {
+      context.addIssue({ code: "custom", message: "the next review or expiry must follow review completion" });
+    }
+  }
+});

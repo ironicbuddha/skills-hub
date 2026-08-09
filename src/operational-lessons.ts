@@ -4,6 +4,8 @@ import {
   activationAttemptContextSchema,
   activationCommandSchema,
   activeRevisionCommandSchema,
+  activeLessonDeadlineCommandSchema,
+  activeLessonReviewCommandSchema,
   approvalAttemptContextSchema,
   approvalCommandSchema,
   captureCandidateCommandSchema,
@@ -553,6 +555,59 @@ export interface RetirementLifecycleEvent {
   outcome: "completed";
 }
 
+/** Detectable alert that leaves the active revision and its semantics unchanged. */
+export interface OverdueReviewLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "active";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "active lesson review is overdue";
+  reviewAt: string;
+  outcome: "alerted";
+}
+
+/** Audit record for an accountable periodic review of active guidance. */
+export interface ActiveLessonReviewLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "active";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: "human";
+  occurredAt: string;
+  reason: "active lesson review completed";
+  reviewOutcome: string;
+  evidenceConsidered: readonly string[];
+  nextReviewAt?: string | undefined;
+  expiresAt?: string | undefined;
+  outcome: "completed";
+}
+
+/** Automatic terminal transition once the approved hard expiry is reached. */
+export interface ExpiryLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "active";
+  toState: "retired";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "active lesson approval expired";
+  expiresAt: string;
+  retirementReason: "expired";
+  unreconciledEnforcementLinks: readonly string[];
+  outcome: "completed";
+}
+
 /** Audit event emitted when successor activation or lineage blocks replacement. */
 export type BlockedReplacementLifecycleEvent = Omit<BlockedActivationLifecycleEvent, "reason"> & {
   reason: "replacement activation gates were not satisfied";
@@ -576,6 +631,9 @@ export type LifecycleEvent =
   | BlockedReplacementLifecycleEvent
   | CrossLessonSupersessionLifecycleEvent
   | RetirementLifecycleEvent
+  | OverdueReviewLifecycleEvent
+  | ActiveLessonReviewLifecycleEvent
+  | ExpiryLifecycleEvent
   | ConflictSuspensionLifecycleEvent;
 
 /**
@@ -641,6 +699,19 @@ export interface CrossLessonSupersessionSink {
 /** Durable boundary appending a retired revision and its Lifecycle Event. */
 export interface RetirementSink {
   retireActiveRevision(retired: RetiredLesson, event: RetirementLifecycleEvent): void;
+}
+
+/** Atomic boundary for deadline alerts and any automatic expiry transition. */
+export interface ActiveLessonDeadlineSink {
+  applyDeadlineOutcome(
+    lesson: ActiveLesson | RetiredLesson,
+    events: readonly (OverdueReviewLifecycleEvent | ExpiryLifecycleEvent)[],
+  ): void;
+}
+
+/** Durable boundary for an accountable review that does not mutate the revision. */
+export interface ActiveLessonReviewSink {
+  appendCompletedReview(active: ActiveLesson, event: ActiveLessonReviewLifecycleEvent): void;
 }
 
 export interface SubmitForReviewCommand {
@@ -1228,6 +1299,125 @@ export function retireActiveLesson(
   });
   sink.retireActiveRevision(retired, event);
   return retired;
+}
+
+/** Evaluates mandatory-review and hard-expiry deadlines as one atomic outcome. */
+export function evaluateActiveLessonDeadlines(
+  active: ActiveLesson,
+  input: unknown,
+  sink: ActiveLessonDeadlineSink,
+  latestReview?: ActiveLessonReviewLifecycleEvent,
+): { lesson: ActiveLesson | RetiredLesson; overdueReview: boolean } {
+  const parsed = activeLessonDeadlineCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
+  }
+  const command = parsed.data;
+  if (latestReview && (latestReview.lessonId !== active.lessonId || latestReview.revision !== active.revision)) {
+    throw new CandidateTransitionError("the latest review must belong to the active revision");
+  }
+  const occurredAt = Date.parse(command.occurredAt);
+  if (latestReview && Date.parse(latestReview.occurredAt) > occurredAt) {
+    throw new CandidateTransitionError("a future review cannot alter current deadline evaluation");
+  }
+  const reviewAt = latestReview?.nextReviewAt;
+  const overdueReview = reviewAt
+    ? occurredAt >= Date.parse(reviewAt)
+    : latestReview ? false : occurredAt >= Date.parse(active.approval.reviewAt);
+  const expiresAt = latestReview?.expiresAt ?? active.approval.expiresAt;
+  const events: (OverdueReviewLifecycleEvent | ExpiryLifecycleEvent)[] = [];
+
+  if (overdueReview) {
+    events.push(deepFreeze({
+      eventId: `${active.lessonId}:${active.revision}:review-overdue:${command.occurredAt}`,
+      lessonId: active.lessonId,
+      fromState: "active" as const,
+      toState: "active" as const,
+      revision: active.revision,
+      actor: command.actor.identity,
+      actorAuthority: command.actor.authority,
+      actorKind: command.actor.kind,
+      occurredAt: command.occurredAt,
+      reason: "active lesson review is overdue" as const,
+      reviewAt: reviewAt ?? active.approval.reviewAt,
+      outcome: "alerted" as const,
+    }));
+  }
+
+  let lesson: ActiveLesson | RetiredLesson = active;
+  if (expiresAt && occurredAt >= Date.parse(expiresAt)) {
+    lesson = deepFreeze({
+      ...active,
+      state: "retired" as const,
+      retiredAt: command.occurredAt,
+      retiredBy: command.actor.identity,
+      retirementReason: "expired" as const,
+    });
+    events.push(deepFreeze({
+      eventId: `${active.lessonId}:${active.revision}:expired:${expiresAt}`,
+      lessonId: active.lessonId,
+      fromState: "active" as const,
+      toState: "retired" as const,
+      revision: active.revision,
+      actor: command.actor.identity,
+      actorAuthority: command.actor.authority,
+      actorKind: command.actor.kind,
+      occurredAt: command.occurredAt,
+      reason: "active lesson approval expired" as const,
+      expiresAt,
+      retirementReason: "expired" as const,
+      unreconciledEnforcementLinks: active.approval.enforcementLinks
+        .filter(({ deploymentState }) => deploymentState !== "disabled" && deploymentState !== "removed")
+        .map(({ linkId }) => linkId),
+      outcome: "completed" as const,
+    }));
+  }
+
+  sink.applyDeadlineOutcome(lesson, events);
+  return { lesson, overdueReview };
+}
+
+/** Records a human periodic review while preserving the immutable active revision. */
+export function completeActiveLessonReview(
+  active: ActiveLesson,
+  input: unknown,
+  sink: ActiveLessonReviewSink,
+): ActiveLesson {
+  const parsed = activeLessonReviewCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
+  }
+  const command = parsed.data;
+  if (command.actor.authority !== active.reviewAssignment.requiredAuthority
+    || !active.reviewAssignment.reviewers.some(({ identity }) => identity === command.actor.identity)) {
+    throw new CandidateTransitionError("active lesson review requires an assigned human reviewer with the required authority");
+  }
+  const boundEvidenceIds = new Set([
+    ...active.evidenceReferences.map(({ evidenceId }) => evidenceId),
+    ...active.approval.evidenceReferences.map(({ evidenceId }) => evidenceId),
+  ]);
+  if (command.evidenceConsidered.some((evidenceId) => !boundEvidenceIds.has(evidenceId))) {
+    throw new CandidateTransitionError("active lesson review evidence must be bound to the reviewed revision");
+  }
+  const event = deepFreeze({
+    eventId: `${active.lessonId}:${active.revision}:reviewed:${command.occurredAt}`,
+    lessonId: active.lessonId,
+    fromState: "active" as const,
+    toState: "active" as const,
+    revision: active.revision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: "human" as const,
+    occurredAt: command.occurredAt,
+    reason: "active lesson review completed" as const,
+    reviewOutcome: command.outcome,
+    evidenceConsidered: command.evidenceConsidered,
+    nextReviewAt: command.nextReviewAt,
+    expiresAt: command.expiresAt,
+    outcome: "completed" as const,
+  });
+  sink.appendCompletedReview(active, event);
+  return active;
 }
 
 /** Returns guidance only for consumer-eligible revisions; candidates yield none. */
