@@ -495,19 +495,7 @@ test("an incomplete review assignment is blocked and audited", () => {
 });
 
 test("a material change creates a new captured revision with lineage and no carried review", () => {
-  const captured = captureCandidate(command(), captureSink());
-  const underReview = submitCandidateForReview(
-    captured,
-    {
-      actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
-      occurredAt: "2026-08-09T10:05:00.000Z",
-      assignment: reviewAssignment(),
-    },
-    {
-      appendReviewTransition() {},
-      appendBlockedReviewAttempt() {},
-    },
-  );
+  const underReview = reviewedCandidate();
   const revisions: CandidateLesson[] = [];
   const events: LifecycleEvent[] = [];
   const sink: RevisionSink = {
@@ -565,16 +553,7 @@ test("a material change creates a new captured revision with lineage and no carr
 });
 
 test("a revision with no changed value is blocked and audited", () => {
-  const captured = captureCandidate(command(), captureSink());
-  const underReview = submitCandidateForReview(
-    captured,
-    {
-      actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
-      occurredAt: "2026-08-09T10:05:00.000Z",
-      assignment: reviewAssignment(),
-    },
-    { appendReviewTransition() {}, appendBlockedReviewAttempt() {} },
-  );
+  const underReview = reviewedCandidate();
   const events: LifecycleEvent[] = [];
   const sink: RevisionSink = {
     appendRevision() {
@@ -646,16 +625,7 @@ test.each([
   ["rejected", "The proposed invariant is broader than the evidence supports."],
   ["withdrawn", "The owner withdrew the candidate pending new evidence."],
 ] as const)("human review records a %s disposition as rejection", (disposition, reason) => {
-  const captured = captureCandidate(command(), captureSink());
-  const underReview = submitCandidateForReview(
-    captured,
-    {
-      actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
-      occurredAt: "2026-08-09T10:05:00.000Z",
-      assignment: reviewAssignment(),
-    },
-    { appendReviewTransition() {}, appendBlockedReviewAttempt() {} },
-  );
+  const underReview = reviewedCandidate();
   const revisions: RejectedCandidateLesson[] = [];
   const events: LifecycleEvent[] = [];
   const sink: RejectionSink = {
@@ -690,16 +660,7 @@ test.each([
 });
 
 test("a blocked rejection attempt is audited without changing candidate state", () => {
-  const captured = captureCandidate(command(), captureSink());
-  const underReview = submitCandidateForReview(
-    captured,
-    {
-      actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
-      occurredAt: "2026-08-09T10:05:00.000Z",
-      assignment: reviewAssignment(),
-    },
-    { appendReviewTransition() {}, appendBlockedReviewAttempt() {} },
-  );
+  const underReview = reviewedCandidate();
   const events: LifecycleEvent[] = [];
   const sink: RejectionSink = {
     appendRejection() {
@@ -745,16 +706,7 @@ test("a blocked rejection attempt is audited without changing candidate state", 
 });
 
 test("automation cannot reject by claiming an assigned human identity and authority", () => {
-  const captured = captureCandidate(command(), captureSink());
-  const underReview = submitCandidateForReview(
-    captured,
-    {
-      actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
-      occurredAt: "2026-08-09T10:05:00.000Z",
-      assignment: reviewAssignment(),
-    },
-    { appendReviewTransition() {}, appendBlockedReviewAttempt() {} },
-  );
+  const underReview = reviewedCandidate();
   let blocked = 0;
 
   assert.throws(
