@@ -25,7 +25,9 @@ const sanitizedText = ordinaryText
   .refine((value) => !/[\r\n\0]/u.test(value), "sanitized facts must be single-line text");
 
 const factClass = z.enum(["operation", "observed-outcome", "trust-boundary", "impact"]);
-const actor = z.object({ identity: ordinaryText, authority: ordinaryText }).strict();
+const actor = z
+  .object({ identity: ordinaryText, authority: ordinaryText, kind: z.enum(["human", "service"]) })
+  .strict();
 const sourceEvent = z
   .object({ sourceId: ordinaryText, sourceKind: ordinaryText, observedAt: isoInstant })
   .strict();
@@ -60,6 +62,19 @@ const confidence = z
   })
   .strict();
 
+const reviewAssignment = z
+  .object({
+    reviewers: z
+      .array(z.object({ identity: ordinaryText, kind: z.literal("human") }).strict())
+      .min(1),
+    requiredAuthority: ordinaryText,
+    assignedBy: ordinaryText,
+    assignedAt: isoInstant,
+    provenance: ordinaryText,
+    status: z.literal("assigned"),
+  })
+  .strict();
+
 /** Runtime schema for the public Candidate Lesson capture command. */
 export const captureCandidateCommandSchema = z
   .object({
@@ -87,3 +102,57 @@ export const captureCandidateCommandSchema = z
       context.addIssue({ code: "custom", message: "incident fact class was not declared by sanitization" });
     }
   });
+
+/** Runtime schema for assigning a captured candidate to accountable human review. */
+export const reviewSubmissionCommandSchema = z
+  .object({
+    actor,
+    occurredAt: isoInstant,
+    assignment: reviewAssignment,
+  })
+  .strict()
+  .superRefine((command, context) => {
+    if (command.assignment.assignedBy !== command.actor.identity) {
+      context.addIssue({ code: "custom", message: "assignment provenance must name the assigning actor" });
+    }
+    if (command.assignment.assignedAt !== command.occurredAt) {
+      context.addIssue({ code: "custom", message: "assignment time must match the review transition" });
+    }
+  });
+
+/** Actor metadata retained when a governance-relevant review attempt is blocked. */
+export const reviewAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();
+
+const materialChanges = z
+  .object({
+    title: sanitizedText.optional(),
+    failureMode: sanitizedText.optional(),
+    evidenceSummary: sanitizedText.optional(),
+    confidence: confidence.optional(),
+    recurrenceSignature: sanitizedText.optional(),
+    invariant: sanitizedText.optional(),
+    guidance: sanitizedText.optional(),
+    owner: ordinaryText.optional(),
+  })
+  .strict()
+  .refine((changes) => Object.keys(changes).length > 0, "a material revision requires changed content");
+
+/** Runtime schema for creating a new immutable candidate revision. */
+export const materialRevisionCommandSchema = z
+  .object({
+    actor,
+    occurredAt: isoInstant,
+    changeSummary: sanitizedText,
+    changes: materialChanges,
+  })
+  .strict();
+
+/** Runtime schema for a human rejection or owner-recorded withdrawal. */
+export const rejectionCommandSchema = z
+  .object({
+    actor,
+    occurredAt: isoInstant,
+    disposition: z.enum(["rejected", "withdrawn"]),
+    reason: sanitizedText,
+  })
+  .strict();
