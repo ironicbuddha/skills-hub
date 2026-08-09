@@ -156,3 +156,95 @@ export const rejectionCommandSchema = z
     reason: sanitizedText,
   })
   .strict();
+
+const regressionClaim = z.object({
+  expectedNonOccurrence: sanitizedText,
+  falsePositiveBoundary: sanitizedText,
+}).strict();
+const severeFirstOccurrence = z.object({
+  justification: sanitizedText,
+  deterministicRegressionEvidence: z.array(ordinaryText).min(1),
+}).strict();
+const approvalEvidenceReference = z.object({
+  evidenceId: ordinaryText,
+  kind: z.enum(["recurrence", "regression"]),
+  supportedRevision: z.number().int().positive(),
+  sanitizedSummary: sanitizedText,
+  classification: ordinaryText,
+  accessBoundary: ordinaryText,
+  observedAt: isoInstant,
+  collector: ordinaryText,
+  immutableLocator: ordinaryText,
+  retention: ordinaryText,
+}).strict();
+const conflictRecord = z.object({
+  conflictId: ordinaryText,
+  revisionIds: z.array(ordinaryText).min(2),
+  overlappingScope: sanitizedText,
+  contradictoryObligations: z.array(sanitizedText).min(2),
+  discoveredAt: isoInstant,
+  discoveredBy: ordinaryText,
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  status: z.enum(["open", "resolved", "excepted"]),
+  owner: ordinaryText,
+  resolutionRationale: sanitizedText.nullable(),
+  resolutionAuthority: ordinaryText.nullable(),
+  exceptionExpiresAt: isoInstant.nullable(),
+  resultingRevisionIds: z.array(ordinaryText),
+}).strict();
+const enforcementLink = z.object({
+  linkId: ordinaryText,
+  controlClass: ordinaryText,
+  target: ordinaryText,
+  owner: ordinaryText,
+  implementedRevisionId: ordinaryText,
+  deploymentState: z.enum(["planned", "ready", "active", "drifted", "disabled", "removed"]),
+  verification: sanitizedText,
+  bypassPolicy: sanitizedText,
+  rollbackOperation: sanitizedText,
+}).strict();
+const rollbackPlan = z.object({
+  affectedProjections: z.array(ordinaryText).min(1),
+  recoveryAction: sanitizedText,
+  verification: sanitizedText,
+}).strict();
+
+/** Runtime schema for approving one exact, governance-complete Lesson Revision. */
+export const approvalCommandSchema = z
+  .object({
+    actor,
+    occurredAt: isoInstant,
+    revisionId: ordinaryText,
+    rationale: sanitizedText,
+    conditions: z.array(sanitizedText),
+    waivers: z.array(sanitizedText),
+    recurrenceEvidence: z.array(ordinaryText).min(1).optional(),
+    severeFirstOccurrence: severeFirstOccurrence.optional(),
+    evidenceReferences: z.array(approvalEvidenceReference).min(1),
+    regressionClaims: z.array(regressionClaim).min(1),
+    applicability: sanitizedText,
+    exclusions: z.array(sanitizedText),
+    scopeClass: ordinaryText,
+    severity: z.enum(["low", "medium", "high", "critical"]),
+    failureBehavior: sanitizedText,
+    reviewAt: isoInstant,
+    expiresAt: isoInstant.optional(),
+    expiryRationale: sanitizedText.optional(),
+    conflictReferences: z.array(ordinaryText),
+    conflictRecords: z.array(conflictRecord),
+    requiredEnforcementClasses: z.array(ordinaryText).min(1),
+    enforcementLinks: z.array(enforcementLink).min(1),
+    rollbackPlan,
+  })
+  .strict()
+  .superRefine((command, context) => {
+    if (!command.recurrenceEvidence && !command.severeFirstOccurrence) {
+      context.addIssue({ code: "custom", message: "recurrence evidence or a severe-first-occurrence exception is required" });
+    }
+    if (!command.expiresAt && !command.expiryRationale) {
+      context.addIssue({ code: "custom", message: "expiry or an expiry rationale is required" });
+    }
+  });
+
+/** Actor metadata retained when a governance-relevant approval attempt is blocked. */
+export const approvalAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();

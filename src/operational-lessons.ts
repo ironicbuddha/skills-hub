@@ -1,6 +1,8 @@
 import type { Writable } from "node:stream";
 
 import {
+  approvalAttemptContextSchema,
+  approvalCommandSchema,
   captureCandidateCommandSchema,
   materialRevisionCommandSchema,
   rejectionCommandSchema,
@@ -142,10 +144,90 @@ export interface RejectedCandidateLesson extends CandidateLessonFields {
   dispositionAt: string;
 }
 
+export interface RegressionClaim {
+  expectedNonOccurrence: string;
+  falsePositiveBoundary: string;
+}
+
+export interface ApprovalCommand {
+  actor: Actor;
+  occurredAt: string;
+  revisionId: string;
+  rationale: string;
+  conditions: string[];
+  waivers: string[];
+  recurrenceEvidence?: string[] | undefined;
+  severeFirstOccurrence?: { justification: string; deterministicRegressionEvidence: string[] } | undefined;
+  evidenceReferences: {
+    evidenceId: string;
+    kind: "recurrence" | "regression";
+    supportedRevision: number;
+    sanitizedSummary: string;
+    classification: string;
+    accessBoundary: string;
+    observedAt: string;
+    collector: string;
+    immutableLocator: string;
+    retention: string;
+  }[];
+  regressionClaims: RegressionClaim[];
+  applicability: string;
+  exclusions: string[];
+  scopeClass: string;
+  severity: "low" | "medium" | "high" | "critical";
+  failureBehavior: string;
+  reviewAt: string;
+  expiresAt?: string | undefined;
+  expiryRationale?: string | undefined;
+  conflictReferences: string[];
+  conflictRecords: {
+    conflictId: string;
+    revisionIds: string[];
+    overlappingScope: string;
+    contradictoryObligations: string[];
+    discoveredAt: string;
+    discoveredBy: string;
+    severity: "low" | "medium" | "high" | "critical";
+    status: "open" | "resolved" | "excepted";
+    owner: string;
+    resolutionRationale: string | null;
+    resolutionAuthority: string | null;
+    exceptionExpiresAt: string | null;
+    resultingRevisionIds: string[];
+  }[];
+  requiredEnforcementClasses: string[];
+  enforcementLinks: {
+    linkId: string;
+    controlClass: string;
+    target: string;
+    owner: string;
+    implementedRevisionId: string;
+    deploymentState: "planned" | "ready" | "active" | "drifted" | "disabled" | "removed";
+    verification: string;
+    bypassPolicy: string;
+    rollbackOperation: string;
+  }[];
+  rollbackPlan: { affectedProjections: string[]; recoveryAction: string; verification: string };
+}
+
+export interface ApprovalRecord extends Omit<ApprovalCommand, "actor" | "occurredAt"> {
+  approver: string;
+  authority: string;
+  approvedAt: string;
+}
+
+export interface ApprovedLesson extends CandidateLessonFields {
+  state: "approved";
+  reviewAssignment: Readonly<ReviewAssignment>;
+  approval: Readonly<ApprovalRecord>;
+}
+
 export type CandidateLesson =
   | CapturedCandidateLesson
   | UnderReviewCandidateLesson
   | RejectedCandidateLesson;
+
+export type OperationalLesson = CandidateLesson | ApprovedLesson;
 
 /** The append-only audit event emitted for a successful capture. */
 export interface CaptureLifecycleEvent {
@@ -252,6 +334,35 @@ export interface BlockedRejectionLifecycleEvent {
   outcome: "blocked";
 }
 
+export interface ApprovalLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "under_review";
+  toState: "approved";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: "human";
+  occurredAt: string;
+  reason: string;
+  approval: Readonly<ApprovalRecord>;
+  outcome: "completed";
+}
+
+export interface BlockedApprovalLifecycleEvent {
+  eventId: string;
+  lessonId: string;
+  fromState: "under_review";
+  toState: "under_review";
+  revision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "approval contract was not satisfied";
+  outcome: "blocked";
+}
+
 export type LifecycleEvent =
   | CaptureLifecycleEvent
   | ReviewLifecycleEvent
@@ -259,7 +370,9 @@ export type LifecycleEvent =
   | RevisionLifecycleEvent
   | BlockedRevisionLifecycleEvent
   | RejectionLifecycleEvent
-  | BlockedRejectionLifecycleEvent;
+  | BlockedRejectionLifecycleEvent
+  | ApprovalLifecycleEvent
+  | BlockedApprovalLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -282,6 +395,11 @@ export interface RevisionSink {
 export interface RejectionSink {
   appendRejection(revision: RejectedCandidateLesson, event: RejectionLifecycleEvent): void;
   appendBlockedRejection(event: BlockedRejectionLifecycleEvent): void;
+}
+
+export interface ApprovalSink {
+  appendApproval(revision: ApprovedLesson, event: ApprovalLifecycleEvent): void;
+  appendBlockedApproval(event: BlockedApprovalLifecycleEvent): void;
 }
 
 export interface SubmitForReviewCommand {
@@ -532,8 +650,107 @@ export function rejectCandidate(
   return rejected;
 }
 
+/** Approves one exact revision after every governance gate is explicitly satisfied. */
+export function approveCandidate(
+  candidate: UnderReviewCandidateLesson,
+  input: unknown,
+  sink: ApprovalSink,
+): ApprovedLesson {
+  const parsed = approvalCommandSchema.safeParse(input);
+  const attempt = approvalAttemptContextSchema.safeParse(input);
+  const evidenceIsBound = parsed.success
+    && parsed.data.evidenceReferences.every(({ supportedRevision }) => supportedRevision === candidate.revision)
+    && (!parsed.data.recurrenceEvidence || parsed.data.recurrenceEvidence.every((evidenceId) =>
+      parsed.data.evidenceReferences.some((reference) =>
+        reference.evidenceId === evidenceId && reference.kind === "recurrence")))
+    && (!parsed.data.severeFirstOccurrence || parsed.data.severeFirstOccurrence.deterministicRegressionEvidence.every(
+      (evidenceId) => parsed.data.evidenceReferences.some((reference) =>
+        reference.evidenceId === evidenceId && reference.kind === "regression"),
+    ));
+  const conflictsAreBound = parsed.success
+    && parsed.data.conflictReferences.every((conflictId) => parsed.data.conflictRecords.some((record) =>
+      record.conflictId === conflictId && record.revisionIds.includes(candidate.revisionId)))
+    && parsed.data.conflictRecords.every((record) =>
+      record.revisionIds.includes(candidate.revisionId)
+      && parsed.data.conflictReferences.includes(record.conflictId)
+      && (record.status === "open" || Boolean(record.resolutionRationale && record.resolutionAuthority))
+      && (record.status !== "excepted"
+        || Boolean(record.exceptionExpiresAt
+          && Date.parse(record.exceptionExpiresAt) > Date.parse(parsed.data.occurredAt))));
+  const enforcementIsBound = parsed.success
+    && parsed.data.enforcementLinks.every(({ implementedRevisionId }) => implementedRevisionId === candidate.revisionId)
+    && parsed.data.requiredEnforcementClasses.every((controlClass) =>
+      parsed.data.enforcementLinks.some((link) => link.controlClass === controlClass));
+  const severeExceptionIsValid = parsed.success && (!parsed.data.severeFirstOccurrence
+    || parsed.data.severity === "high" || parsed.data.severity === "critical");
+  const timingIsValid = parsed.success
+    && Date.parse(parsed.data.occurredAt) >= Date.parse(candidate.reviewAssignment.assignedAt)
+    && Date.parse(parsed.data.occurredAt) >= Date.parse(candidate.revisionCreatedAt)
+    && parsed.data.evidenceReferences.every(({ observedAt }) =>
+      Date.parse(observedAt) <= Date.parse(parsed.data.occurredAt))
+    && Date.parse(parsed.data.reviewAt) > Date.parse(parsed.data.occurredAt)
+    && (!parsed.data.expiresAt || Date.parse(parsed.data.expiresAt) > Date.parse(parsed.data.reviewAt));
+  const authorized = parsed.success
+    && parsed.data.actor.kind === "human"
+    && parsed.data.revisionId === candidate.revisionId
+    && parsed.data.actor.authority === candidate.reviewAssignment.requiredAuthority
+    && candidate.reviewAssignment.reviewers.some(({ identity }) => identity === parsed.data.actor.identity)
+    && evidenceIsBound
+    && conflictsAreBound
+    && enforcementIsBound
+    && severeExceptionIsValid
+    && timingIsValid;
+
+  if (!parsed.success || !authorized) {
+    if (!attempt.success) {
+      throw new CandidateValidationError(parsed.success ? "invalid approval actor context" : parsed.error.issues.map(({ message }) => message).join("; "));
+    }
+    const blockedEvent = deepFreeze({
+      eventId: `${candidate.lessonId}:${candidate.revision}:approval-blocked:${attempt.data.occurredAt}`,
+      lessonId: candidate.lessonId,
+      fromState: "under_review" as const,
+      toState: "under_review" as const,
+      revision: candidate.revision,
+      actor: attempt.data.actor.identity,
+      actorAuthority: attempt.data.actor.authority,
+      actorKind: attempt.data.actor.kind,
+      occurredAt: attempt.data.occurredAt,
+      reason: "approval contract was not satisfied" as const,
+      outcome: "blocked" as const,
+    });
+    sink.appendBlockedApproval(blockedEvent);
+    throw new CandidateTransitionError(blockedEvent.reason);
+  }
+
+  const command: ApprovalCommand = parsed.data;
+  const { actor, occurredAt, ...approvedContract } = command;
+  const approval = deepFreeze({
+    ...approvedContract,
+    approver: actor.identity,
+    authority: actor.authority,
+    approvedAt: occurredAt,
+  });
+  const approved = deepFreeze({ ...candidate, state: "approved" as const, approval });
+  const event = deepFreeze({
+    eventId: `${candidate.lessonId}:${candidate.revision}:approved`,
+    lessonId: candidate.lessonId,
+    fromState: "under_review" as const,
+    toState: "approved" as const,
+    revision: candidate.revision,
+    actor: actor.identity,
+    actorAuthority: actor.authority,
+    actorKind: "human" as const,
+    occurredAt,
+    reason: command.rationale,
+    approval,
+    outcome: "completed" as const,
+  });
+  sink.appendApproval(approved, event);
+  return approved;
+}
+
 /** Returns guidance only for consumer-eligible revisions; candidates yield none. */
-export function selectConsumerGuidance(lesson: CandidateLesson): null {
+export function selectConsumerGuidance(lesson: OperationalLesson): null {
   void lesson;
   return null;
 }

@@ -8,6 +8,7 @@ import { Writable } from "node:stream";
 import { test } from "@jest/globals";
 
 import {
+  approveCandidate,
   captureCandidate,
   CandidateTransitionError,
   CandidateValidationError,
@@ -18,6 +19,9 @@ import {
   selectConsumerGuidance,
   type CaptureCandidateCommand,
   type CaptureSink,
+  type ApprovalCommand,
+  type ApprovalSink,
+  type ApprovedLesson,
   type CandidateLesson,
   type LifecycleEvent,
   type ReviewAssignment,
@@ -111,6 +115,67 @@ const reviewAssignment = (): ReviewAssignment => ({
   provenance: "incident-review-queue",
   status: "assigned",
 });
+
+const approvalCommand = (): ApprovalCommand => ({
+  actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+  occurredAt: "2026-08-09T10:30:00.000Z",
+  revisionId: "lesson_publication_boundary:1",
+  rationale: "The reproduced interpreter-boundary failure warrants durable guidance.",
+  conditions: ["Recheck after the safe publication helper ships."],
+  waivers: [],
+  recurrenceEvidence: ["evidence-42"],
+  evidenceReferences: [{
+    evidenceId: "evidence-42",
+    kind: "recurrence",
+    supportedRevision: 1,
+    sanitizedSummary: "The interpreter-boundary failure recurred in an isolated reproduction.",
+    classification: "confidential",
+    accessBoundary: "incident-reviewers",
+    observedAt: "2026-08-09T10:20:00.000Z",
+    collector: "human-reviewer",
+    immutableLocator: "sha256:recurrence-42",
+    retention: "365d",
+  }],
+  regressionClaims: [{
+    expectedNonOccurrence: "Markdown metacharacters do not execute during publication.",
+    falsePositiveBoundary: "Literal metacharacters remain byte-preserved in the published body.",
+  }],
+  applicability: "Operations that publish arbitrary Markdown through an interpreter-capable tool.",
+  exclusions: ["Static Markdown already stored without interpretation."],
+  scopeClass: "repository",
+  severity: "high",
+  failureBehavior: "Block publication when a data-safe boundary is unavailable.",
+  reviewAt: "2026-09-09T10:30:00.000Z",
+  expiresAt: "2026-11-09T10:30:00.000Z",
+  conflictReferences: [],
+  conflictRecords: [],
+  requiredEnforcementClasses: ["regression-test"],
+  enforcementLinks: [{
+    linkId: "control-safe-publication-test",
+    controlClass: "regression-test",
+    target: "tests/operational-lessons.contract.test.ts",
+    owner: "platform-safety",
+    implementedRevisionId: "lesson_publication_boundary:1",
+    deploymentState: "ready",
+    verification: "The inert Markdown publication regression passes.",
+    bypassPolicy: "No automated bypass; human approval is required.",
+    rollbackOperation: "Remove the control after retiring the governing lesson.",
+  }],
+  rollbackPlan: {
+    affectedProjections: ["repository guidance", "publication helper"],
+    recoveryAction: "Retire the revision and remove or disable its linked projections.",
+    verification: "Confirm consumers cannot retrieve it and the prior publication path is restored.",
+  },
+});
+
+function reviewedCandidate() {
+  const captured = captureCandidate(command(), captureSink());
+  return submitCandidateForReview(captured, {
+    actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
+    occurredAt: "2026-08-09T10:05:00.000Z",
+    assignment: reviewAssignment(),
+  }, { appendReviewTransition() {}, appendBlockedReviewAttempt() {} });
+}
 
 test("capture creates immutable revision 1 and an append-only event", () => {
   const revisions: CandidateLesson[] = [];
@@ -566,6 +631,118 @@ test("automation cannot reject by claiming an assigned human identity and author
     CandidateTransitionError,
   );
   assert.equal(blocked, 1);
+});
+
+test("an authorized human approves one exact, complete revision without activating it", () => {
+  const reviewed = reviewedCandidate();
+  const revisions: ApprovedLesson[] = [];
+  const events: LifecycleEvent[] = [];
+  const sink: ApprovalSink = {
+    appendApproval(revision, event) { revisions.push(revision); events.push(event); },
+    appendBlockedApproval(event) { events.push(event); },
+  };
+
+  const approved = approveCandidate(reviewed, approvalCommand(), sink);
+
+  assert.equal(approved.state, "approved");
+  assert.equal(approved.approval.revisionId, reviewed.revisionId);
+  assert.equal(approved.approval.approver, "human-reviewer");
+  assert.equal(approved.approval.authority, "lesson-approver");
+  assert.equal(approved.approval.approvedAt, "2026-08-09T10:30:00.000Z");
+  assert.deepEqual(approved.approval.conditions, approvalCommand().conditions);
+  assert.deepEqual(revisions, [approved]);
+  assert.equal(events[0]?.toState, "approved");
+  assert.equal(selectConsumerGuidance(approved), null);
+  assert.equal(Object.isFrozen(approved.approval), true);
+});
+
+test.each([
+  ["service actor", { actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "service" } }],
+  ["wrong revision", { revisionId: "lesson_publication_boundary:2" }],
+  ["missing recurrence evidence", { recurrenceEvidence: [] }],
+  ["missing regression claims", { regressionClaims: [] }],
+  ["missing applicability", { applicability: "" }],
+  ["missing exclusions", { exclusions: undefined }],
+  ["missing conflict references", { conflictReferences: undefined }],
+  ["missing enforcement classes", { requiredEnforcementClasses: [] }],
+  ["missing rollback plan", { rollbackPlan: undefined }],
+  ["unbound recurrence evidence", { recurrenceEvidence: ["unknown-evidence"] }],
+  ["unbound enforcement link", { enforcementLinks: [{ ...approvalCommand().enforcementLinks[0]!, implementedRevisionId: "lesson_publication_boundary:2" }] }],
+  ["review timing in the past", { reviewAt: "2026-08-01T10:30:00.000Z" }],
+  ["approval before review assignment", { occurredAt: "2026-08-09T10:01:00.000Z" }],
+  ["future-dated evidence", { evidenceReferences: [{ ...approvalCommand().evidenceReferences[0]!, observedAt: "2026-08-09T10:31:00.000Z" }] }],
+] as const)("approval blocks %s and records the governance attempt", (_name, changes) => {
+  const reviewed = reviewedCandidate();
+  const events: LifecycleEvent[] = [];
+  const input = { ...approvalCommand(), ...changes };
+
+  assert.throws(() => approveCandidate(reviewed, input, {
+    appendApproval() { assert.fail("invalid approval must not be appended"); },
+    appendBlockedApproval(event) { events.push(event); },
+  }), CandidateTransitionError);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.toState, "under_review");
+  assert.equal(events[0]?.outcome, "blocked");
+});
+
+test("a severe first occurrence can replace recurrence evidence only with explicit justification", () => {
+  const reviewed = reviewedCandidate();
+  const command = approvalCommand();
+  const { recurrenceEvidence: _evidence, ...withoutEvidence } = command;
+  const approved = approveCandidate(reviewed, {
+    ...withoutEvidence,
+    evidenceReferences: [{
+      evidenceId: "regression-safe-markdown-publication-2026-08-09",
+      kind: "regression",
+      supportedRevision: 1,
+      sanitizedSummary: "The deterministic safe-publication regression passed.",
+      classification: "internal",
+      accessBoundary: "lesson-reviewers",
+      observedAt: "2026-08-09T10:25:00.000Z",
+      collector: "human-reviewer",
+      immutableLocator: "sha256:regression-42",
+      retention: "365d",
+    }],
+    severeFirstOccurrence: {
+      justification: "A repeat could execute attacker-controlled commands with repository credentials.",
+      deterministicRegressionEvidence: ["regression-safe-markdown-publication-2026-08-09"],
+    },
+  }, { appendApproval() {}, appendBlockedApproval() {} });
+  assert.equal(approved.state, "approved");
+});
+
+test("a low-severity first occurrence cannot use the severe exception", () => {
+  const reviewed = reviewedCandidate();
+  const { recurrenceEvidence: _evidence, ...input } = approvalCommand();
+  assert.throws(() => approveCandidate(reviewed, {
+    ...input,
+    severity: "low",
+    evidenceReferences: [{
+      evidenceId: "regression-safe-markdown-publication-2026-08-09",
+      kind: "regression",
+      supportedRevision: 1,
+      sanitizedSummary: "The deterministic safe-publication regression passed.",
+      classification: "internal",
+      accessBoundary: "lesson-reviewers",
+      observedAt: "2026-08-09T10:25:00.000Z",
+      collector: "human-reviewer",
+      immutableLocator: "sha256:regression-42",
+      retention: "365d",
+    }],
+    severeFirstOccurrence: {
+      justification: "This does not meet the severe exception threshold.",
+      deterministicRegressionEvidence: ["regression-safe-markdown-publication-2026-08-09"],
+    },
+  }, { appendApproval() { assert.fail("low severity cannot use the exception"); }, appendBlockedApproval() {} }), CandidateTransitionError);
+});
+
+test("confidence and weak proxies cannot substitute for approval evidence", () => {
+  const reviewed = reviewedCandidate();
+  const { recurrenceEvidence: _evidence, ...input } = approvalCommand();
+  assert.throws(() => approveCandidate(reviewed, {
+    ...input,
+    weakProxies: ["retrieval-count", "model-self-report", "absence-of-reports"],
+  }, { appendApproval() { assert.fail("weak proxies are not evidence"); }, appendBlockedApproval() {} }), CandidateTransitionError);
 });
 
 test("Markdown is published as inert, byte-preserved data", () => {
