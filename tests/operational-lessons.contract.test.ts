@@ -7,6 +7,8 @@ import { Writable } from "node:stream";
 
 import { test } from "@jest/globals";
 
+import { lessonRollbackCommandSchema } from "../src/operational-lessons-schema.ts";
+
 import {
   approveCandidate,
   activateApprovedLesson,
@@ -16,6 +18,8 @@ import {
   CandidateValidationError,
   publishMarkdown,
   evaluateActiveLessonDeadlines,
+  initiateLessonRollback,
+  retireBlockedLessonRollback,
   replaceActiveLesson,
   retireActiveLesson,
   reviseActiveLesson,
@@ -44,6 +48,8 @@ import {
   type RejectedCandidateLesson,
   type RejectionSink,
   type ReplacementSink,
+  type RollbackSink,
+  type RollbackRetirementSink,
   type RetirementSink,
   type ActiveLessonDeadlineSink,
   type ActiveLessonReviewSink,
@@ -259,18 +265,24 @@ function activeCandidate(): ActiveLesson {
   }, approved.approval.enforcementLinks);
 }
 
-function reviewedSuccessor(predecessor = activeCandidate()) {
+function reviewedSuccessor(
+  predecessor = activeCandidate(),
+  changes = { guidance: "Pass Markdown through a byte-preserving, data-safe input boundary." },
+) {
   return reviseActiveLesson(predecessor, {
     actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
     occurredAt: "2026-08-09T11:10:00.000Z",
     changeSummary: "Clarify that every publication boundary must preserve literal bytes.",
-    changes: { guidance: "Pass Markdown through a byte-preserving, data-safe input boundary." },
+    changes,
     assignment: { ...reviewAssignment(), assignedAt: "2026-08-09T11:10:00.000Z" },
   }, { appendActiveRevision() {}, appendBlockedActiveRevision() {} });
 }
 
-function approvedSuccessor(predecessor = activeCandidate()) {
-  const successor = reviewedSuccessor(predecessor);
+function approvedSuccessor(
+  predecessor = activeCandidate(),
+  changes = { guidance: "Pass Markdown through a byte-preserving, data-safe input boundary." },
+) {
+  const successor = reviewedSuccessor(predecessor, changes);
   const priorApproval = approvalCommand();
   return approveCandidate(successor, {
     ...priorApproval,
@@ -1345,6 +1357,245 @@ test("a failure inside the replacement commit cannot mutate either input revisio
   assert.equal(successor.state, "approved");
   assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
   assert.equal(selectConsumerGuidance(successor), null);
+});
+
+test("a harmful revision rolls back through the public lifecycle without rewriting history", () => {
+  const safeActive = activeCandidate();
+  const harmfulApproved = approvedSuccessor(safeActive, {
+    guidance: "Publish Markdown by constructing a shell command.",
+  });
+  const harmfulReplacement = replaceActiveLesson(safeActive, harmfulApproved, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: harmfulApproved.revisionId,
+    regressionEvidence: ["regression-safe-publication-v2"],
+  }, { replaceActiveRevision() {}, appendBlockedReplacement() {} }, {
+    predecessor: safeActive.approval.enforcementLinks,
+    successor: harmfulApproved.approval.enforcementLinks,
+  });
+  const safeSource = harmfulReplacement.predecessor;
+  const harmfulActive = harmfulReplacement.successor;
+  const disabledHarmfulControl = transitionEnforcementLink(
+    harmfulActive,
+    harmfulActive.approval.enforcementLinks[0]!,
+    {
+      actor: { identity: "emergency-control-service", authority: "break-glass-control", kind: "service" },
+      occurredAt: "2026-08-09T12:05:00.000Z",
+      deploymentState: "disabled",
+      verificationEvidence: {
+        evidenceId: "verification-harmful-control-disabled",
+        kind: "disablement",
+        outcome: "passed",
+        verifiedAt: "2026-08-09T12:05:00.000Z",
+        immutableLocator: "sha256:verification-harmful-control-disabled",
+      },
+      deployment: harmfulActive.approval.enforcementLinks[0]!.deployment,
+      reason: "Disable the harmful control through the independent emergency path.",
+    },
+    { replaceEnforcementLink() {} },
+  );
+  const revisions: OperationalLesson[] = [safeSource, harmfulActive];
+  const events: LifecycleEvent[] = [];
+  const sink: RollbackSink = {
+    commitRollback(retiredDefective, rollbackRevision, event) {
+      revisions.push(retiredDefective, rollbackRevision);
+      events.push(event);
+    },
+  };
+
+  const initiated = initiateLessonRollback(harmfulActive, safeSource, {
+    actor: { identity: "safety-owner", authority: "lesson-rollback", kind: "human" },
+    occurredAt: "2026-08-09T12:10:00.000Z",
+    defectiveRevisionId: harmfulActive.revisionId,
+    safeSourceRevisionId: safeSource.revisionId,
+    reason: "The active revision deployed harmful interpreter guidance.",
+    affectedProjections: [harmfulActive.approval.enforcementLinks[0]!.target],
+    recoveryPlan: {
+      defectiveComponent: "lesson-guidance-projector",
+      disableOperation: {
+        operation: "Disable the harmful projection before restoring safe semantics.",
+        executor: "emergency-control-service",
+      },
+      recoveryOperation: {
+        operation: "Project the last known-safe semantics as a new revision.",
+        executor: "lesson-recovery-service",
+      },
+    },
+    verificationEvidence: [
+      {
+        evidenceId: "rollback-disablement-check",
+        operation: "disable",
+        outcome: "passed",
+        verifiedAt: "2026-08-09T12:06:00.000Z",
+        immutableLocator: "sha256:rollback-disablement-check",
+      },
+      {
+        evidenceId: "rollback-recovery-check",
+        operation: "recovery",
+        outcome: "passed",
+        verifiedAt: "2026-08-09T12:09:00.000Z",
+        immutableLocator: "sha256:rollback-recovery-check",
+      },
+    ],
+    assignment: {
+      ...reviewAssignment(),
+      assignedBy: "safety-owner",
+      assignedAt: "2026-08-09T12:10:00.000Z",
+      provenance: "harmful-revision-rollback",
+    },
+  }, sink, [disabledHarmfulControl]);
+
+  assert.equal(initiated.defective.state, "retired");
+  assert.equal(selectConsumerGuidance(initiated.defective), null);
+  assert.equal(initiated.rollback.state, "under_review");
+  assert.equal(initiated.rollback.revision, 3);
+  assert.equal(initiated.rollback.guidance, safeSource.guidance);
+  assert.equal(initiated.rollback.rollbackDefectiveRevisionId, harmfulActive.revisionId);
+  assert.equal(initiated.rollback.rollbackSafeSourceRevisionId, safeSource.revisionId);
+  assert.equal(harmfulActive.state, "active");
+  assert.equal(harmfulActive.guidance, "Publish Markdown by constructing a shell command.");
+  assert.equal(safeSource.state, "superseded");
+  const rollbackEvent = events[0];
+  assert.equal(rollbackEvent?.reason, "harmful active revision rollback initiated");
+  if (!rollbackEvent || !("affectedProjections" in rollbackEvent)) {
+    assert.fail("the rollback event was not recorded");
+  }
+  assert.equal(rollbackEvent.defectiveRevisionId, harmfulActive.revisionId);
+  assert.equal(rollbackEvent.safeSourceRevisionId, safeSource.revisionId);
+  assert.deepEqual(rollbackEvent.affectedProjections, [disabledHarmfulControl.target]);
+  assert.deepEqual(rollbackEvent.verificationEvidence.map(({ evidenceId }) => evidenceId),
+    ["rollback-disablement-check", "rollback-recovery-check"]);
+  assert.equal(rollbackEvent.recoveryPlan.recoveryOperation.executor, "lesson-recovery-service");
+
+  const approval = approvalCommand();
+  const approvedRollback = approveCandidate(initiated.rollback, {
+    ...approval,
+    occurredAt: "2026-08-09T12:30:00.000Z",
+    revisionId: initiated.rollback.revisionId,
+    evidenceReferences: [
+      ...approval.evidenceReferences.map((reference) => ({
+        ...reference,
+        supportedRevision: initiated.rollback.revision,
+      })),
+      {
+        evidenceId: "regression-rollback-safe-publication",
+        kind: "regression" as const,
+        supportedRevision: initiated.rollback.revision,
+        sanitizedSummary: "The restored safe semantics passed regression verification.",
+        classification: "internal",
+        accessBoundary: "lesson-reviewers",
+        observedAt: "2026-08-09T12:25:00.000Z",
+        collector: "lesson-recovery-service",
+        immutableLocator: "sha256:regression-rollback-safe-publication",
+        retention: "365d",
+      },
+    ],
+    enforcementLinks: approval.enforcementLinks.map((link) => ({
+      ...link,
+      implementedRevisionId: initiated.rollback.revisionId,
+    })),
+  }, { appendApproval() {}, appendBlockedApproval() {} });
+  const activeRollback = activateApprovedLesson(approvedRollback, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T13:00:00.000Z",
+    revisionId: approvedRollback.revisionId,
+    regressionEvidence: ["regression-rollback-safe-publication"],
+  }, { activateAsSoleRevision() {}, appendBlockedActivation() {} }, approvedRollback.approval.enforcementLinks);
+
+  assert.equal(activeRollback.state, "active");
+  assert.equal(activeRollback.guidance, safeSource.guidance);
+  assert.equal(activeRollback.rollbackDefectiveRevisionId, harmfulActive.revisionId);
+  assert.equal(activeRollback.rollbackSafeSourceRevisionId, safeSource.revisionId);
+  assert.deepEqual(revisions.slice(0, 2), [safeSource, harmfulActive]);
+  assert.equal(Object.isFrozen(initiated.rollback), true);
+});
+
+test("critical rollback operations reject dependence on the defective component", () => {
+  const parsed = lessonRollbackCommandSchema.safeParse({
+    actor: { identity: "safety-owner", authority: "lesson-rollback", kind: "human" },
+    occurredAt: "2026-08-09T12:10:00.000Z",
+    defectiveRevisionId: "lesson_publication_boundary:2",
+    safeSourceRevisionId: "lesson_publication_boundary:1",
+    reason: "The active revision deployed harmful interpreter guidance.",
+    affectedProjections: ["repository-guidance"],
+    recoveryPlan: {
+      defectiveComponent: "lesson-guidance-projector",
+      disableOperation: {
+        operation: "Disable the harmful projection.",
+        executor: "lesson-guidance-projector",
+      },
+      recoveryOperation: {
+        operation: "Restore the safe semantics.",
+        executor: "lesson-guidance-projector",
+      },
+    },
+    verificationEvidence: [
+      {
+        evidenceId: "rollback-disablement-check",
+        operation: "disable",
+        outcome: "passed",
+        verifiedAt: "2026-08-09T12:06:00.000Z",
+        immutableLocator: "sha256:rollback-disablement-check",
+      },
+      {
+        evidenceId: "rollback-recovery-check",
+        operation: "recovery",
+        outcome: "passed",
+        verifiedAt: "2026-08-09T12:09:00.000Z",
+        immutableLocator: "sha256:rollback-recovery-check",
+      },
+    ],
+    assignment: {
+      ...reviewAssignment(),
+      assignedBy: "safety-owner",
+      assignedAt: "2026-08-09T12:10:00.000Z",
+    },
+  });
+
+  assert.equal(parsed.success, false);
+  assert.match(parsed.success ? "" : parsed.error.issues.map(({ message }) => message).join("; "),
+    /independent executor/u);
+});
+
+test("a rollback revision retires after its normal activation gates block recovery", () => {
+  const safe = activeCandidate();
+  const approved = approvedSuccessor(safe);
+  const approvedRollback = {
+    ...approved,
+    rollbackDefectiveRevisionId: approved.predecessorRevisionId!,
+    rollbackSafeSourceRevisionId: safe.revisionId,
+  };
+  let blockedActivation: Extract<LifecycleEvent, { reason: "activation gates were not satisfied" }> | undefined;
+
+  assert.throws(() => activateApprovedLesson(approvedRollback, {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: approvedRollback.revisionId,
+    regressionEvidence: [],
+  }, {
+    activateAsSoleRevision() { assert.fail("blocked rollback activation must not become active"); },
+    appendBlockedActivation(event) { blockedActivation = event; },
+  }, approvedRollback.approval.enforcementLinks), CandidateTransitionError);
+
+  const events: LifecycleEvent[] = [];
+  const sink: RollbackRetirementSink = {
+    retireBlockedRollback(_retired, event) { events.push(event); },
+  };
+  const retired = retireBlockedLessonRollback(approvedRollback, blockedActivation!, {
+    actor: { identity: "safety-owner", authority: "lesson-rollback", kind: "human" },
+    occurredAt: "2026-08-09T12:05:00.000Z",
+    reason: "Safe activation is impossible until a replacement control can be verified.",
+  }, sink);
+
+  assert.equal(retired.state, "retired");
+  assert.equal(selectConsumerGuidance(retired), null);
+  assert.equal(retired.rollbackDefectiveRevisionId, approvedRollback.rollbackDefectiveRevisionId);
+  assert.equal(retired.rollbackSafeSourceRevisionId, approvedRollback.rollbackSafeSourceRevisionId);
+  assert.equal(events[0]?.reason, "blocked rollback revision retired");
+  assert.equal(events[0] && "blockedActivationEventId" in events[0]
+    ? events[0].blockedActivationEventId
+    : undefined, blockedActivation?.eventId);
+  assert.equal(approvedRollback.state, "approved");
 });
 
 test("cross-lesson supersession atomically records bidirectional lineage to an active replacement", () => {

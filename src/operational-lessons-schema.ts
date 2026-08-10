@@ -166,6 +166,55 @@ export const activeRevisionCommandSchema = z
     }
   });
 
+const rollbackOperation = z.object({
+  operation: sanitizedText,
+  executor: ordinaryText,
+}).strict();
+const rollbackVerificationEvidence = z.object({
+  evidenceId: ordinaryText,
+  operation: z.enum(["disable", "recovery"]),
+  outcome: z.literal("passed"),
+  verifiedAt: isoInstant,
+  immutableLocator: ordinaryText,
+}).strict();
+
+/** Runtime schema for starting an audited recovery from a harmful active revision. */
+export const lessonRollbackCommandSchema = z.object({
+  actor: actor.extend({ kind: z.literal("human") }),
+  occurredAt: isoInstant,
+  defectiveRevisionId: ordinaryText,
+  safeSourceRevisionId: ordinaryText,
+  reason: sanitizedText,
+  affectedProjections: z.array(ordinaryText).min(1),
+  recoveryPlan: z.object({
+    defectiveComponent: ordinaryText,
+    disableOperation: rollbackOperation,
+    recoveryOperation: rollbackOperation,
+  }).strict(),
+  verificationEvidence: z.array(rollbackVerificationEvidence).min(2),
+  assignment: reviewAssignment,
+}).strict().superRefine((command, context) => {
+  if (new Set(command.affectedProjections).size !== command.affectedProjections.length) {
+    context.addIssue({ code: "custom", message: "affected rollback projections must be unique" });
+  }
+  if (command.recoveryPlan.disableOperation.executor === command.recoveryPlan.defectiveComponent
+    || command.recoveryPlan.recoveryOperation.executor === command.recoveryPlan.defectiveComponent) {
+    context.addIssue({ code: "custom", message: "critical rollback operations require an independent executor" });
+  }
+  if (!command.verificationEvidence.some(({ operation }) => operation === "disable")
+    || !command.verificationEvidence.some(({ operation }) => operation === "recovery")) {
+    context.addIssue({ code: "custom", message: "rollback requires disable and recovery verification evidence" });
+  }
+  if (command.verificationEvidence.some(({ verifiedAt }) =>
+    Date.parse(verifiedAt) > Date.parse(command.occurredAt))) {
+    context.addIssue({ code: "custom", message: "rollback verification cannot occur in the future" });
+  }
+  if (command.assignment.assignedBy !== command.actor.identity
+    || command.assignment.assignedAt !== command.occurredAt) {
+    context.addIssue({ code: "custom", message: "rollback review assignment must be authorized by the rollback actor" });
+  }
+});
+
 /** Runtime schema for a human rejection or owner-recorded withdrawal. */
 export const rejectionCommandSchema = z
   .object({
