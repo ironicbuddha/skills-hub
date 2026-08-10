@@ -6,6 +6,7 @@ import {
   activateApprovedLesson,
   CandidateTransitionError,
   CandidateValidationError,
+  exposeUnreconciledEnforcementDrift,
 } from "./operational-lessons.ts";
 import type {
   ActivationSink,
@@ -55,6 +56,7 @@ export interface ConflictSuspensionLifecycleEvent {
   occurredAt: string;
   reason: "active lesson suspended by credible harmful conflict";
   conflictId: string;
+  unreconciledEnforcementLinks: readonly string[];
   outcome: "completed";
 }
 
@@ -161,8 +163,9 @@ function suspendIfHarmed(
   occurredAt: string,
 ): OperationalLesson {
   if (lesson.state !== "active" || !conflict.credibleHarm) return lesson;
+  const reconciliation = exposeUnreconciledEnforcementDrift(lesson);
   return deepFreeze({
-    ...lesson,
+    ...reconciliation.lesson,
     state: "retired" as const,
     retiredAt: occurredAt,
     retiredBy: actor.identity,
@@ -188,6 +191,9 @@ function suspensionEvent(
     occurredAt,
     reason: "active lesson suspended by credible harmful conflict",
     conflictId: conflict.conflictId,
+    unreconciledEnforcementLinks: lesson.enforcementLinks
+      .filter(({ deploymentState }) => deploymentState === "drifted")
+      .map(({ linkId }) => linkId),
     outcome: "completed",
   });
 }

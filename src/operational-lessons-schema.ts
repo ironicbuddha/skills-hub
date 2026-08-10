@@ -249,17 +249,37 @@ export const conflictResolutionCommandSchema = z.object({
     context.addIssue({ code: "custom", message: "an excepted Conflict requires an expiry" });
   }
 });
-const enforcementLink = z.object({
+const enforcementDeploymentState = z.enum(["planned", "ready", "active", "drifted", "disabled", "removed"]);
+
+/** Runtime schema for one independently deployed lesson projection or control. */
+export const enforcementLinkSchema = z.object({
   linkId: ordinaryText,
   controlClass: ordinaryText,
   target: ordinaryText,
   owner: ordinaryText,
   implementedRevisionId: ordinaryText,
-  deploymentState: z.enum(["planned", "ready", "active", "drifted", "disabled", "removed"]),
-  verification: sanitizedText,
+  deploymentState: enforcementDeploymentState,
+  verificationEvidence: sanitizedText.nullable(),
+  deployedVersion: ordinaryText.nullable(),
+  deployedAt: isoInstant.nullable(),
   bypassPolicy: sanitizedText,
   rollbackOperation: sanitizedText,
-}).strict();
+}).strict().superRefine((link, context) => {
+  const deployed = link.deploymentState === "ready"
+    || link.deploymentState === "active"
+    || link.deploymentState === "drifted";
+  if (deployed && (!link.verificationEvidence || !link.deployedVersion || !link.deployedAt)) {
+    context.addIssue({ code: "custom", message: "a deployed Enforcement Link requires evidence, version, and time" });
+  }
+  if (link.deploymentState === "planned"
+    && (link.verificationEvidence || link.deployedVersion || link.deployedAt)) {
+    context.addIssue({ code: "custom", message: "a planned Enforcement Link cannot claim deployment evidence" });
+  }
+  if ((link.deploymentState === "disabled" || link.deploymentState === "removed")
+    && !link.verificationEvidence) {
+    context.addIssue({ code: "custom", message: "a reconciled Enforcement Link requires verification evidence" });
+  }
+});
 const rollbackPlan = z.object({
   affectedProjections: z.array(ordinaryText).min(1),
   recoveryAction: sanitizedText,
@@ -290,7 +310,7 @@ export const approvalCommandSchema = z
     conflictReferences: z.array(ordinaryText),
     conflictRecords: z.array(conflictRecordSchema),
     requiredEnforcementClasses: z.array(ordinaryText).min(1),
-    enforcementLinks: z.array(enforcementLink).min(1),
+    enforcementLinks: z.array(enforcementLinkSchema).min(1),
     rollbackPlan,
   })
   .strict()
@@ -337,6 +357,35 @@ export const activationCommandSchema = z.object({
 
 /** Actor metadata retained when a governance-relevant activation attempt is blocked. */
 export const activationAttemptContextSchema = z.object({ actor, occurredAt: isoInstant }).passthrough();
+
+/** Runtime schema for independently advancing or reconciling one Enforcement Link. */
+export const enforcementLinkTransitionCommandSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+  deploymentState: enforcementDeploymentState,
+  verificationEvidence: sanitizedText.nullable(),
+  deployedVersion: ordinaryText.nullable(),
+  deployedAt: isoInstant.nullable(),
+  reason: sanitizedText,
+}).strict().superRefine((command, context) => {
+  const deployed = command.deploymentState === "ready"
+    || command.deploymentState === "active"
+    || command.deploymentState === "drifted";
+  if (deployed && (!command.verificationEvidence || !command.deployedVersion || !command.deployedAt)) {
+    context.addIssue({ code: "custom", message: "a deployed Enforcement Link requires evidence, version, and time" });
+  }
+  if (command.deploymentState === "planned"
+    && (command.verificationEvidence || command.deployedVersion || command.deployedAt)) {
+    context.addIssue({ code: "custom", message: "a planned Enforcement Link cannot claim deployment evidence" });
+  }
+  if ((command.deploymentState === "disabled" || command.deploymentState === "removed")
+    && !command.verificationEvidence) {
+    context.addIssue({ code: "custom", message: "a reconciled Enforcement Link requires verification evidence" });
+  }
+  if (command.deployedAt && Date.parse(command.deployedAt) > Date.parse(command.occurredAt)) {
+    context.addIssue({ code: "custom", message: "an Enforcement Link cannot be deployed in the future" });
+  }
+});
 
 /** Runtime schema for a human decision that ends active guidance. */
 export const terminalDispositionCommandSchema = z.object({

@@ -22,6 +22,7 @@ import {
   reviseCandidate,
   rejectCandidate,
   submitCandidateForReview,
+  transitionEnforcementLink,
   selectConsumerGuidance,
   supersedeActiveLessonAcrossLessons,
   type CaptureCandidateCommand,
@@ -34,6 +35,7 @@ import {
   type ActiveLesson,
   type CandidateLesson,
   type LifecycleEvent,
+  type EnforcementLinkLifecycleEvent,
   type OperationalLesson,
   type ReviewAssignment,
   type ReviewSink,
@@ -188,7 +190,9 @@ const approvalCommand = (): ApprovalCommand => ({
     owner: "platform-safety",
     implementedRevisionId: "lesson_publication_boundary:1",
     deploymentState: "ready",
-    verification: "The inert Markdown publication regression passes.",
+    verificationEvidence: "The inert Markdown publication regression passes.",
+    deployedVersion: "sha256:safe-publication-test-v1",
+    deployedAt: "2026-08-09T10:24:00.000Z",
     bypassPolicy: "No automated bypass; human approval is required.",
     rollbackOperation: "Remove the control after retiring the governing lesson.",
   }],
@@ -899,7 +903,13 @@ test.each([
 
 test("an Enforcement Link does not satisfy activation unless its deployment is ready", () => {
   const approved = approvedCandidate({
-    enforcementLinks: [{ ...approvalCommand().enforcementLinks[0]!, deploymentState: "planned" }],
+    enforcementLinks: [{
+      ...approvalCommand().enforcementLinks[0]!,
+      deploymentState: "planned",
+      verificationEvidence: null,
+      deployedVersion: null,
+      deployedAt: null,
+    }],
   });
 
   assert.throws(() => activateApprovedLesson(approved, {
@@ -917,9 +927,106 @@ test("an Enforcement Link does not satisfy activation unless its deployment is r
   }), CandidateTransitionError);
 });
 
+test("partial rollout tracks each Enforcement Link independently before activation", () => {
+  const baseLink = approvalCommand().enforcementLinks[0]!;
+  const approved = approvedCandidate({
+    requiredEnforcementClasses: ["regression-test", "repository-guidance"],
+    evidenceReferences: [
+      ...approvalCommand().evidenceReferences,
+      {
+        evidenceId: "regression-safe-publication",
+        kind: "regression",
+        supportedRevision: 1,
+        sanitizedSummary: "The safe publication regression passed in the deployment environment.",
+        classification: "internal",
+        accessBoundary: "lesson-reviewers",
+        observedAt: "2026-08-09T10:25:00.000Z",
+        collector: "deployment-service",
+        immutableLocator: "sha256:regression-safe-publication",
+        retention: "365d",
+      },
+    ],
+    enforcementLinks: [
+      baseLink,
+      {
+        ...baseLink,
+        linkId: "control-safe-publication-guidance",
+        controlClass: "repository-guidance",
+        target: "AGENTS.md#safe-publication",
+        deploymentState: "planned",
+        verificationEvidence: null,
+        deployedVersion: null,
+        deployedAt: null,
+      },
+    ],
+  });
+
+  assert.throws(() => activateApprovedLesson(approved, activationCommand(), {
+    activateAsSoleRevision() { assert.fail("a target existing on a planned link must not activate"); },
+    appendBlockedActivation() {},
+  }), CandidateTransitionError);
+
+  const events: EnforcementLinkLifecycleEvent[] = [];
+  const ready = transitionEnforcementLink(approved, "control-safe-publication-guidance", {
+    actor: { identity: "guidance-deployer", authority: "control-owner", kind: "service" },
+    occurredAt: "2026-08-09T10:55:00.000Z",
+    deploymentState: "ready",
+    verificationEvidence: "The projected guidance was verified byte-for-byte.",
+    deployedVersion: "sha256:guidance-v1",
+    deployedAt: "2026-08-09T10:54:00.000Z",
+    reason: "The repository projection is deployed and verified.",
+  }, {
+    replaceEnforcementLink(_lesson, event) { events.push(event); },
+  });
+
+  assert.deepEqual(ready.enforcementLinks.map(({ deploymentState }) => deploymentState),
+    ["ready", "ready"]);
+  assert.equal(ready.approval, approved.approval);
+  assert.equal(approved.enforcementLinks[1]?.deploymentState, "planned");
+  assert.equal(events[0]?.fromDeploymentState, "planned");
+  assert.equal(events[0]?.toDeploymentState, "ready");
+  assert.equal(activateApprovedLesson(ready, activationCommand(), {
+    activateAsSoleRevision() {},
+    appendBlockedActivation() {},
+  }).state, "active");
+});
+
+test("control drift is audited without changing the Active Lesson state", () => {
+  const active = activeCandidate();
+  const events: EnforcementLinkLifecycleEvent[] = [];
+
+  const drifted = transitionEnforcementLink(active, "control-safe-publication-test", {
+    actor: { identity: "drift-monitor", authority: "control-observer", kind: "service" },
+    occurredAt: "2026-08-09T11:20:00.000Z",
+    deploymentState: "drifted",
+    verificationEvidence: "The deployed control digest differs from its verified version.",
+    deployedVersion: "sha256:unexpected-control-version",
+    deployedAt: "2026-08-09T11:15:00.000Z",
+    reason: "Verification detected control drift.",
+  }, {
+    replaceEnforcementLink(_lesson, event) { events.push(event); },
+  });
+
+  const link = drifted.enforcementLinks[0];
+  assert.equal(drifted.state, "active");
+  assert.equal(selectConsumerGuidance(drifted), active.guidance);
+  assert.equal(link?.deploymentState, "drifted");
+  assert.equal(link?.deployedVersion, "sha256:unexpected-control-version");
+  assert.equal(link?.deployedAt, "2026-08-09T11:15:00.000Z");
+  assert.equal(events[0]?.fromDeploymentState, "ready");
+  assert.equal(events[0]?.toDeploymentState, "drifted");
+  assert.equal(active.enforcementLinks[0]?.deploymentState, "ready");
+});
+
 test("a reasoned authorized expiring waiver can cover a required enforcement class", () => {
   const approved = approvedCandidate({
-    enforcementLinks: [{ ...approvalCommand().enforcementLinks[0]!, deploymentState: "planned" }],
+    enforcementLinks: [{
+      ...approvalCommand().enforcementLinks[0]!,
+      deploymentState: "planned",
+      verificationEvidence: null,
+      deployedVersion: null,
+      deployedAt: null,
+    }],
   });
   const command = activationCommand();
   const active = activateApprovedLesson(approved, {
@@ -1022,8 +1129,12 @@ test("conflicting repository guidance is recorded, suspended, and resolved witho
   assert.equal(outcome.affected[1]?.state, "retired");
   assert.equal(suspended.length, 2);
   assert.equal(suspended[0]?.retirementReason, "suspended");
+  assert.equal(suspended[0]?.enforcementLinks[0]?.deploymentState, "drifted");
   assert.equal(selectConsumerGuidance(outcome.affected[0]!), null);
   assert.equal(events[0]?.reason, "active lesson suspended by credible harmful conflict");
+  assert.deepEqual(events[0] && "unreconciledEnforcementLinks" in events[0]
+    ? events[0].unreconciledEnforcementLinks
+    : undefined, ["control-safe-publication-test"]);
 
   const history: ConflictRecord[] = [outcome.conflict];
   const safeReplacement = approvedSuccessor(active);
@@ -1183,10 +1294,14 @@ test("cross-lesson supersession atomically records bidirectional lineage to an a
   assert.deepEqual(queriedReplacement.state === "active" ? queriedReplacement.replaces : undefined,
     outcome.replacement.replaces);
   assert.equal(outcome.replacement.state, "active");
+  assert.equal(outcome.superseded.enforcementLinks[0]?.deploymentState, "drifted");
   assert.equal(selectConsumerGuidance(outcome.superseded), null);
   assert.equal(selectConsumerGuidance(outcome.replacement), replacement.guidance);
   assert.deepEqual(revisions.slice(0, 2), [predecessor, replacement]);
   assert.equal(events[0]?.reason, "active lesson superseded by cross-lesson replacement");
+  assert.deepEqual(events[0] && "unreconciledEnforcementLinks" in events[0]
+    ? events[0].unreconciledEnforcementLinks
+    : undefined, ["control-safe-publication-test"]);
 });
 
 test("cross-lesson supersession rejects a replacement that is not active", () => {
@@ -1229,8 +1344,12 @@ test("retirement records its human disposition without naming a replacement", ()
   assert.equal(retired.retirementReason, "The guidance no longer applies to supported publication paths.");
   assert.equal("supersededByRevisionId" in retired, false);
   assert.equal(selectConsumerGuidance(retired), null);
+  assert.equal(retired.enforcementLinks[0]?.deploymentState, "drifted");
   assert.deepEqual(revisions[0], active);
   assert.equal(events[0]?.reason, "active lesson retired without replacement");
+  assert.deepEqual(events[0] && "unreconciledEnforcementLinks" in events[0]
+    ? events[0].unreconciledEnforcementLinks
+    : undefined, ["control-safe-publication-test"]);
 });
 
 test("retirement requires a human actor", () => {
@@ -1247,6 +1366,45 @@ test("retirement requires a human actor", () => {
 
   assert.equal(committed, false);
   assert.equal(selectConsumerGuidance(active), active.guidance);
+});
+
+test("disabled controls stay reconciled through retirement and can be removed afterward", () => {
+  const active = activeCandidate();
+  const disabled = transitionEnforcementLink(active, "control-safe-publication-test", {
+    actor: { identity: "control-owner", authority: "control-owner", kind: "human" },
+    occurredAt: "2026-08-09T13:50:00.000Z",
+    deploymentState: "disabled",
+    verificationEvidence: "The control no longer runs in the repository pipeline.",
+    deployedVersion: "sha256:safe-publication-test-v1",
+    deployedAt: "2026-08-09T10:24:00.000Z",
+    reason: "Disable the projection before its governing lesson retires.",
+  }, { replaceEnforcementLink() {} });
+  const terminalEvents: LifecycleEvent[] = [];
+  const retired = retireActiveLesson(disabled, {
+    actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
+    occurredAt: "2026-08-09T14:00:00.000Z",
+    reason: "The guidance no longer applies to supported publication paths.",
+  }, {
+    retireActiveRevision(_lesson, event) { terminalEvents.push(event); },
+  });
+
+  assert.equal(retired.enforcementLinks[0]?.deploymentState, "disabled");
+  assert.deepEqual(terminalEvents[0] && "unreconciledEnforcementLinks" in terminalEvents[0]
+    ? terminalEvents[0].unreconciledEnforcementLinks
+    : undefined, []);
+
+  const removed = transitionEnforcementLink(retired, "control-safe-publication-test", {
+    actor: { identity: "control-owner", authority: "control-owner", kind: "human" },
+    occurredAt: "2026-08-09T14:10:00.000Z",
+    deploymentState: "removed",
+    verificationEvidence: "The control target and pipeline registration are absent.",
+    deployedVersion: "sha256:safe-publication-test-v1",
+    deployedAt: "2026-08-09T10:24:00.000Z",
+    reason: "Remove the disabled projection after retirement.",
+  }, { replaceEnforcementLink() {} });
+
+  assert.equal(removed.state, "retired");
+  assert.equal(removed.enforcementLinks[0]?.deploymentState, "removed");
 });
 
 test("an overdue review alerts without changing active lesson semantics", () => {
@@ -1380,6 +1538,7 @@ test("passing hard expiry atomically retires guidance as expired", () => {
   assert.equal(outcome.lesson.state, "retired");
   assert.equal(outcome.lesson.retirementReason, "expired");
   assert.equal(outcome.lesson.retiredBy, "lesson-scheduler");
+  assert.equal(outcome.lesson.enforcementLinks[0]?.deploymentState, "drifted");
   assert.equal(selectConsumerGuidance(outcome.lesson), null);
   const expiryEvent = events.find((event) => event.reason === "active lesson approval expired");
   assert.equal(expiryEvent?.toState, "retired");
