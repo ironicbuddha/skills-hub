@@ -1,6 +1,11 @@
 import type { Writable } from "node:stream";
 
 import {
+  lessonRollbackCommandSchema,
+  rollbackRetirementCommandSchema,
+} from "./operational-lesson-rollback-schema.ts";
+
+import {
   activationAttemptContextSchema,
   activationCommandSchema,
   activeRevisionCommandSchema,
@@ -10,12 +15,10 @@ import {
   approvalCommandSchema,
   captureCandidateCommandSchema,
   enforcementLinkTransitionCommandSchema,
-  lessonRollbackCommandSchema,
   materialRevisionCommandSchema,
   rejectionCommandSchema,
   reviewAttemptContextSchema,
   reviewSubmissionCommandSchema,
-  rollbackRetirementCommandSchema,
   terminalDispositionCommandSchema,
 } from "./operational-lessons-schema.ts";
 import type {

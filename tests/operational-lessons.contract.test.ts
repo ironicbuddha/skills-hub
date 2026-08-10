@@ -7,7 +7,7 @@ import { Writable } from "node:stream";
 
 import { test } from "@jest/globals";
 
-import { lessonRollbackCommandSchema } from "../src/operational-lessons-schema.ts";
+import { lessonRollbackCommandSchema } from "../src/operational-lesson-rollback-schema.ts";
 
 import {
   approveCandidate,
