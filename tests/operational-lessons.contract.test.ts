@@ -256,7 +256,7 @@ function activeCandidate(): ActiveLesson {
   return activateApprovedLesson(approved, activationCommand(), {
     activateAsSoleRevision() {},
     appendBlockedActivation() {},
-  });
+  }, approved.approval.enforcementLinks);
 }
 
 function reviewedSuccessor(predecessor = activeCandidate()) {
@@ -882,7 +882,12 @@ test("an approved exact revision activates only after regression, conflict, and 
     appendBlockedActivation(event) { events.push(event); },
   };
 
-  const active = activateApprovedLesson(approved, activationCommand(), sink);
+  const active = activateApprovedLesson(
+    approved,
+    activationCommand(),
+    sink,
+    approved.approval.enforcementLinks,
+  );
 
   assert.equal(active.state, "active");
   assert.equal(active.activatedAt, "2026-08-09T11:00:00.000Z");
@@ -902,7 +907,7 @@ test.each([
   assert.throws(() => activateApprovedLesson(approved, { ...activationCommand(), ...changes }, {
     activateAsSoleRevision() { assert.fail("a failed gate must not activate"); },
     appendBlockedActivation(event) { events.push(event); },
-  }), CandidateTransitionError);
+  }, approved.approval.enforcementLinks), CandidateTransitionError);
   assert.equal(approved.state, "approved");
   assert.equal(events[0]?.fromState, "approved");
   assert.equal(events[0]?.toState, "approved");
@@ -931,7 +936,7 @@ test("an Enforcement Link does not satisfy activation unless its deployment is r
   }, {
     activateAsSoleRevision() { assert.fail("a planned link is not ready"); },
     appendBlockedActivation() {},
-  }), CandidateTransitionError);
+  }, approved.approval.enforcementLinks), CandidateTransitionError);
 });
 
 test("partial rollout tracks each Enforcement Link independently before activation", () => {
@@ -970,7 +975,7 @@ test("partial rollout tracks each Enforcement Link independently before activati
   assert.throws(() => activateApprovedLesson(approved, activationCommand(), {
     activateAsSoleRevision() { assert.fail("a target existing on a planned link must not activate"); },
     appendBlockedActivation() {},
-  }), CandidateTransitionError);
+  }, approved.approval.enforcementLinks), CandidateTransitionError);
 
   const events: EnforcementLinkLifecycleEvent[] = [];
   const planned = approved.approval.enforcementLinks[1]!;
@@ -1036,6 +1041,38 @@ test("control drift is audited without changing the Active Lesson state", () => 
   assert.equal(active.approval.enforcementLinks[0]?.deploymentState, "ready");
 });
 
+test("current Enforcement Link drift blocks activation despite stale approved readiness", () => {
+  const approved = approvedCandidate();
+  const drifted = transitionEnforcementLink(approved, approved.approval.enforcementLinks[0]!, {
+    actor: { identity: "drift-monitor", authority: "control-observer", kind: "service" },
+    occurredAt: "2026-08-09T10:55:00.000Z",
+    deploymentState: "drifted",
+    verificationEvidence: {
+      evidenceId: "verification-preactivation-drift",
+      kind: "drift",
+      outcome: "failed",
+      verifiedAt: "2026-08-09T10:55:00.000Z",
+      immutableLocator: "sha256:verification-preactivation-drift",
+    },
+    deployment: { version: "sha256:unexpected-control-version", deployedAt: "2026-08-09T10:54:00.000Z" },
+    reason: "The approved control drifted before lesson activation.",
+  }, { replaceEnforcementLink() {} });
+
+  assert.throws(() => activateApprovedLesson(approved, {
+    ...activationCommand(),
+    regressionEvidence: undefined,
+    nonDeterminismRationale: {
+      rationale: "The model-facing behavior cannot be checked deterministically.",
+      approvedBy: "human-reviewer",
+      authority: "lesson-approver",
+      approvedAt: "2026-08-09T10:50:00.000Z",
+    },
+  }, {
+    activateAsSoleRevision() { assert.fail("current drift must block activation"); },
+    appendBlockedActivation() {},
+  }, [drifted]), CandidateTransitionError);
+});
+
 test("a reasoned authorized expiring waiver can cover a required enforcement class", () => {
   const approved = approvedCandidate({
     enforcementLinks: [{
@@ -1063,7 +1100,7 @@ test("a reasoned authorized expiring waiver can cover a required enforcement cla
       approvedAt: "2026-08-09T10:50:00.000Z",
       expiresAt: "2026-08-10T11:00:00.000Z",
     }],
-  }, { activateAsSoleRevision() {}, appendBlockedActivation() {} });
+  }, { activateAsSoleRevision() {}, appendBlockedActivation() {} }, approved.approval.enforcementLinks);
 
   assert.equal(active.state, "active");
 });
@@ -1095,7 +1132,7 @@ test("an open blocking conflict prevents activation", () => {
   assert.throws(() => activateApprovedLesson(approved, activationCommand(), {
     activateAsSoleRevision() { assert.fail("an open conflict must block activation"); },
     appendBlockedActivation() {},
-  }), CandidateTransitionError);
+  }, approved.approval.enforcementLinks), CandidateTransitionError);
 });
 
 test("conflicting repository guidance is recorded, suspended, and resolved without losing history", () => {
@@ -1213,6 +1250,7 @@ test("conflicting repository guidance is recorded, suspended, and resolved witho
       regressionEvidence: ["regression-safe-publication-v2"],
     },
     { activateAsSoleRevision() {}, appendBlockedActivation() {} },
+    safeReplacement.approval.enforcementLinks,
   );
   assert.equal(activated.state, "active");
   assert.equal(selectConsumerGuidance(activated), safeReplacement.guidance);

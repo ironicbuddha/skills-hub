@@ -1177,7 +1177,7 @@ export function activateApprovedLesson(
   approved: ApprovedLesson,
   input: unknown,
   sink: ActivationSink,
-  enforcementLinks: readonly Readonly<EnforcementLink>[] = approved.approval.enforcementLinks,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
 ): ActiveLesson {
   const parsed = activationCommandSchema.safeParse(input);
   const attempt = activationAttemptContextSchema.safeParse(input);

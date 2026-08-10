@@ -154,6 +154,7 @@ export function activateSafeConflictReplacement(
   conflict: ConflictRecord,
   input: unknown,
   sink: ActivationSink,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
 ): ActiveLesson {
   const suspendedIsAffected = conflict.lessonRevisions.some((reference) =>
     reference.lessonId === suspended.lessonId && reference.revisionId === suspended.revisionId);
@@ -165,7 +166,7 @@ export function activateSafeConflictReplacement(
     || !replacementIsResult) {
     throw new CandidateTransitionError("safe replacement must be an explicit result of the resolved Conflict");
   }
-  return activateApprovedLesson(replacement, input, sink);
+  return activateApprovedLesson(replacement, input, sink, enforcementLinks);
 }
 
 function suspendIfHarmed(
