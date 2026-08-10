@@ -15,6 +15,7 @@ import {
   rejectionCommandSchema,
   reviewAttemptContextSchema,
   reviewSubmissionCommandSchema,
+  rollbackRetirementCommandSchema,
   terminalDispositionCommandSchema,
 } from "./operational-lessons-schema.ts";
 import type {
@@ -333,11 +334,11 @@ export interface RetiredRollbackLesson
   extends Omit<CandidateLessonFields, keyof RollbackLineage>, RollbackLineage {
   state: "retired";
   reviewAssignment: Readonly<ReviewAssignment>;
-  approval: Readonly<ApprovalRecord>;
+  approval?: Readonly<ApprovalRecord> | undefined;
   retiredAt: string;
   retiredBy: string;
   retirementReason: string;
-  blockedActivationEventId: string;
+  blockedGateEventId: string;
 }
 
 export type CandidateLesson =
@@ -475,6 +476,7 @@ export interface RollbackLifecycleEvent {
   actorAuthority: string;
   actorKind: "human";
   occurredAt: string;
+  authorization: Readonly<LessonRollbackCommand["authorization"]>;
   reason: "harmful active revision rollback initiated";
   dispositionReason: string;
   affectedProjections: readonly string[];
@@ -487,7 +489,7 @@ export interface RollbackLifecycleEvent {
 export interface RollbackRetirementLifecycleEvent {
   eventId: string;
   lessonId: string;
-  fromState: "approved";
+  fromState: "under_review" | "approved";
   toState: "retired";
   revision: number;
   actor: string;
@@ -496,9 +498,10 @@ export interface RollbackRetirementLifecycleEvent {
   occurredAt: string;
   reason: "blocked rollback revision retired";
   dispositionReason: string;
-  blockedActivationEventId: string;
+  blockedGateEventId: string;
   defectiveRevisionId: string;
   safeSourceRevisionId: string;
+  impossibilityEvidence: Readonly<RollbackImpossibilityEvidence>;
   outcome: "completed";
 }
 
@@ -781,6 +784,10 @@ export interface ActiveRevisionSink {
 
 /** Atomic boundary that removes harmful guidance and appends its audited recovery revision. */
 export interface RollbackSink {
+  /**
+   * Atomically appends both outcome records and the event; prior revisions,
+   * approvals, evidence, and Lifecycle Events must remain append-only and intact.
+   */
   commitRollback(
     retiredDefective: RetiredLesson,
     rollbackRevision: UnderReviewRollbackLesson,
@@ -891,22 +898,33 @@ export interface ActiveRevisionCommand extends MaterialRevisionCommand {
   assignment: ReviewAssignment;
 }
 
+/** One critical rollback operation and the component responsible for executing it. */
 export interface RollbackOperation {
   operation: string;
   executor: string;
 }
 
+/** Immutable proof that harmful controls were disabled or safe source semantics were verified. */
 export interface RollbackVerificationEvidence {
   evidenceId: string;
-  operation: "disable" | "recovery";
+  operation: "disable" | "safe-source";
   outcome: "passed";
   verifiedAt: string;
   immutableLocator: string;
 }
 
+/** A human-authorized request to recover from one exact harmful Lesson Revision. */
 export interface LessonRollbackCommand {
   actor: Actor & { kind: "human" };
   occurredAt: string;
+  authorization: {
+    authorizationId: string;
+    authorizedActor: string;
+    authorizedBy: string;
+    authority: string;
+    authorizedAt: string;
+    provenance: string;
+  };
   defectiveRevisionId: string;
   safeSourceRevisionId: string;
   reason: string;
@@ -915,17 +933,47 @@ export interface LessonRollbackCommand {
     defectiveComponent: string;
     disableOperation: RollbackOperation;
     recoveryOperation: RollbackOperation;
+    independenceEvidence: {
+      evidenceId: string;
+      outcome: "passed";
+      coveredOperations: ("disable" | "recovery")[];
+      verifiedAt: string;
+      immutableLocator: string;
+    };
   };
   verificationEvidence: RollbackVerificationEvidence[];
   assignment: ReviewAssignment;
 }
 
+/** Immutable links from a rollback revision to its defective and safe source revisions. */
 export interface RollbackLineage {
   rollbackDefectiveRevisionId: string;
   rollbackSafeSourceRevisionId: string;
 }
 
+/** A safe-source rollback revision awaiting the ordinary approval and activation gates. */
 export type UnderReviewRollbackLesson = UnderReviewCandidateLesson & RollbackLineage;
+
+/** A safe-source rollback revision that passed ordinary human approval. */
+export type ApprovedRollbackLesson = ApprovedLesson & RollbackLineage;
+
+/** Evidence that repeated attempts cannot safely satisfy approval or activation. */
+export interface RollbackImpossibilityEvidence {
+  evidenceId: string;
+  conclusion: "safe-activation-impossible";
+  failedGate: "approval" | "activation";
+  attempts: string[];
+  verifiedAt: string;
+  immutableLocator: string;
+}
+
+/** Human disposition for a rollback revision proven unable to activate safely. */
+export interface RollbackRetirementCommand {
+  actor: Actor & { kind: "human" };
+  occurredAt: string;
+  reason: string;
+  impossibilityEvidence: RollbackImpossibilityEvidence;
+}
 
 /** A validation failure raised before the durable capture boundary is called. */
 export class CandidateValidationError extends Error {
@@ -1149,35 +1197,29 @@ export function initiateLessonRollback(
 
 /** Retires an audited rollback revision after its normal activation attempt was blocked. */
 export function retireBlockedLessonRollback(
-  rollback: ApprovedLesson & RollbackLineage,
-  blockedActivation: BlockedActivationLifecycleEvent,
+  rollback: UnderReviewRollbackLesson | ApprovedRollbackLesson,
+  blockedGate: BlockedApprovalLifecycleEvent | BlockedActivationLifecycleEvent,
   input: unknown,
   sink: RollbackRetirementSink,
 ): RetiredRollbackLesson {
-  const command = parseTerminalDispositionCommand(input);
-  const blockedExactRevision = blockedActivation.lessonId === rollback.lessonId
-    && blockedActivation.revision === rollback.revision
-    && blockedActivation.fromState === "approved"
-    && blockedActivation.toState === "approved"
-    && blockedActivation.outcome === "blocked";
-  const timingIsValid = Date.parse(command.occurredAt) >= Date.parse(blockedActivation.occurredAt)
-    && Date.parse(command.occurredAt) >= Date.parse(rollback.approval.approvedAt);
-  if (!blockedExactRevision || !timingIsValid) {
-    throw new CandidateTransitionError("rollback retirement requires its blocked activation event");
+  const parsed = rollbackRetirementCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
   }
-
+  const command: RollbackRetirementCommand = parsed.data;
+  assertRollbackRetirementAllowed(rollback, blockedGate, command);
   const retired = deepFreeze({
     ...rollback,
     state: "retired" as const,
     retiredAt: command.occurredAt,
     retiredBy: command.actor.identity,
     retirementReason: command.reason,
-    blockedActivationEventId: blockedActivation.eventId,
+    blockedGateEventId: blockedGate.eventId,
   });
   const event = deepFreeze({
     eventId: `${rollback.lessonId}:${rollback.revision}:rollback-retired`,
     lessonId: rollback.lessonId,
-    fromState: "approved" as const,
+    fromState: rollback.state,
     toState: "retired" as const,
     revision: rollback.revision,
     actor: command.actor.identity,
@@ -1186,13 +1228,36 @@ export function retireBlockedLessonRollback(
     occurredAt: command.occurredAt,
     reason: "blocked rollback revision retired" as const,
     dispositionReason: command.reason,
-    blockedActivationEventId: blockedActivation.eventId,
+    blockedGateEventId: blockedGate.eventId,
     defectiveRevisionId: rollback.rollbackDefectiveRevisionId,
     safeSourceRevisionId: rollback.rollbackSafeSourceRevisionId,
+    impossibilityEvidence: command.impossibilityEvidence,
     outcome: "completed" as const,
   });
   sink.retireBlockedRollback(retired, event);
   return retired;
+}
+
+function assertRollbackRetirementAllowed(
+  rollback: UnderReviewRollbackLesson | ApprovedRollbackLesson,
+  blockedGate: BlockedApprovalLifecycleEvent | BlockedActivationLifecycleEvent,
+  command: RollbackRetirementCommand,
+) {
+  const expectedFailure = rollback.state === "approved"
+    ? blockedGate.reason === "activation gates were not satisfied"
+      && command.impossibilityEvidence.failedGate === "activation"
+    : blockedGate.reason === "approval contract was not satisfied"
+      && command.impossibilityEvidence.failedGate === "approval";
+  const blockedExactRevision = blockedGate.lessonId === rollback.lessonId
+    && blockedGate.revision === rollback.revision
+    && blockedGate.fromState === rollback.state
+    && blockedGate.toState === rollback.state
+    && blockedGate.outcome === "blocked";
+  const timingIsValid = Date.parse(command.occurredAt) >= Date.parse(blockedGate.occurredAt)
+    && Date.parse(command.impossibilityEvidence.verifiedAt) >= Date.parse(blockedGate.occurredAt);
+  if (!expectedFailure || !blockedExactRevision || !timingIsValid) {
+    throw new CandidateTransitionError("rollback retirement requires evidence for its exact blocked gate");
+  }
 }
 
 /** Records a human rejection; withdrawal uses the same rejected state with its own disposition. */
@@ -1880,6 +1945,7 @@ function createRollbackEvent(
     actorAuthority: command.actor.authority,
     actorKind: "human",
     occurredAt: command.occurredAt,
+    authorization: command.authorization,
     reason: "harmful active revision rollback initiated",
     dispositionReason: command.reason,
     affectedProjections: command.affectedProjections,
