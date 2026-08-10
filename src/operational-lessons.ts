@@ -176,7 +176,7 @@ export interface EnforcementDeployment {
   deployedAt: string;
 }
 
-/** One independently deployed projection or control derived from an exact Lesson Revision. */
+/** One independently deployed projection or control derived from an exact Lesson Version. */
 export interface EnforcementLink {
   linkId: string;
   controlClass: string;
@@ -1277,7 +1277,7 @@ export function transitionEnforcementLink(
   }
   const command: EnforcementLinkTransitionCommand = parsed.data;
   if (!linkMatchesApprovedContract(lesson, prior)) {
-    throw new CandidateTransitionError("the Enforcement Link does not belong to this Lesson Revision");
+    throw new CandidateTransitionError("the Enforcement Link does not belong to this Lesson Version");
   }
   if (prior.deploymentState === "removed" && command.deploymentState !== "removed") {
     throw new CandidateTransitionError("a removed Enforcement Link cannot be redeployed");
@@ -1330,9 +1330,9 @@ export function replaceActiveLesson(
   input: unknown,
   sink: ReplacementSink,
   enforcementLinks: {
-    predecessor?: readonly Readonly<EnforcementLink>[];
-    successor?: readonly Readonly<EnforcementLink>[];
-  } = {},
+    predecessor: readonly Readonly<EnforcementLink>[];
+    successor: readonly Readonly<EnforcementLink>[];
+  },
 ): { predecessor: SupersededLesson; successor: ActiveLesson } {
   let replacement: { predecessor: SupersededLesson; successor: ActiveLesson } | undefined;
   activateApprovedLesson(approvedSuccessor, input, {
@@ -1344,7 +1344,7 @@ export function replaceActiveLesson(
       }
       const reconciliation = assessEnforcementReconciliation(
         predecessor,
-        enforcementLinks.predecessor ?? predecessor.approval.enforcementLinks,
+        enforcementLinks.predecessor,
       );
       const superseded = deepFreeze({
         ...predecessor,
@@ -1365,7 +1365,7 @@ export function replaceActiveLesson(
     appendBlockedActivation(event) {
       sink.appendBlockedReplacement(toBlockedReplacement(event));
     },
-  }, enforcementLinks.successor ?? approvedSuccessor.approval.enforcementLinks);
+  }, enforcementLinks.successor);
   if (!replacement) throw new CandidateTransitionError("replacement was not committed");
   return replacement;
 }
@@ -1376,7 +1376,7 @@ export function supersedeActiveLessonAcrossLessons(
   replacement: OperationalLesson,
   input: unknown,
   sink: CrossLessonSupersessionSink,
-  enforcementLinks: readonly Readonly<EnforcementLink>[] = predecessor.approval.enforcementLinks,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
 ): { superseded: SupersededLesson; replacement: ActiveReplacementLesson } {
   const command = parseTerminalDispositionCommand(input);
   if (replacement.state !== "active"
@@ -1426,7 +1426,7 @@ export function retireActiveLesson(
   active: ActiveLesson,
   input: unknown,
   sink: RetirementSink,
-  enforcementLinks: readonly Readonly<EnforcementLink>[] = active.approval.enforcementLinks,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
 ): RetiredLesson {
   const command = parseTerminalDispositionCommand(input);
   const reconciliation = assessEnforcementReconciliation(active, enforcementLinks);
@@ -1461,8 +1461,8 @@ export function evaluateActiveLessonDeadlines(
   active: ActiveLesson,
   input: unknown,
   sink: ActiveLessonDeadlineSink,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
   latestReview?: ActiveLessonReviewLifecycleEvent,
-  enforcementLinks: readonly Readonly<EnforcementLink>[] = active.approval.enforcementLinks,
 ): { lesson: ActiveLesson | RetiredLesson; overdueReview: boolean } {
   const parsed = activeLessonDeadlineCommandSchema.safeParse(input);
   if (!parsed.success) {
@@ -1774,12 +1774,12 @@ function enforcementLinksMatchApproval(
 }
 
 /** Detects every linked control that still lacks verified disablement or removal. */
-function assessEnforcementReconciliation(
+export function assessEnforcementReconciliation(
   lesson: GovernedLesson,
   enforcementLinks: readonly Readonly<EnforcementLink>[],
 ) {
   if (!enforcementLinksMatchApproval(lesson, enforcementLinks)) {
-    throw new CandidateTransitionError("reconciliation requires every Enforcement Link for the exact Lesson Revision");
+    throw new CandidateTransitionError("reconciliation requires every Enforcement Link for the exact Lesson Version");
   }
   const unreconciledLinkIds = enforcementLinks
     .filter(({ deploymentState }) => deploymentState !== "disabled" && deploymentState !== "removed")

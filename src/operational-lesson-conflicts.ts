@@ -4,6 +4,7 @@ import {
 } from "./operational-lessons-schema.ts";
 import {
   activateApprovedLesson,
+  assessEnforcementReconciliation,
   CandidateTransitionError,
   CandidateValidationError,
 } from "./operational-lessons.ts";
@@ -12,6 +13,7 @@ import type {
   ActiveLesson,
   Actor,
   ApprovedLesson,
+  EnforcementLink,
   OperationalLesson,
   RetiredLesson,
 } from "./operational-lessons.ts";
@@ -73,11 +75,16 @@ export interface ConflictResolutionSink {
   appendConflictResolution(prior: ConflictRecord, resolved: ConflictRecord): void;
 }
 
+export type EnforcementLinksByRevision = Readonly<
+  Record<string, readonly Readonly<EnforcementLink>[]>
+>;
+
 /** Records an explicit Conflict and atomically suspends any credibly harmed active guidance. */
 export function discoverConflict(
   affected: readonly OperationalLesson[],
   input: unknown,
   sink: ConflictSink,
+  enforcementLinksByRevision: EnforcementLinksByRevision,
 ): { conflict: ConflictRecord; affected: readonly OperationalLesson[] } {
   const parsed = conflictDiscoveryCommandSchema.safeParse(input);
   if (!parsed.success) throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
@@ -106,7 +113,13 @@ export function discoverConflict(
   const affectedAfterDiscovery = affected.map((lesson) => suspendIfHarmed(lesson, conflict, actor, occurredAt));
   const suspended = affectedAfterDiscovery.filter((lesson, index): lesson is RetiredLesson =>
     lesson.state === "retired" && affected[index]?.state === "active");
-  const events = suspended.map((lesson) => suspensionEvent(lesson, conflict, actor, occurredAt));
+  const events = suspended.map((lesson) => suspensionEvent(
+    lesson,
+    conflict,
+    actor,
+    occurredAt,
+    enforcementLinksByRevision[lesson.revisionId] ?? [],
+  ));
   sink.recordConflict(conflict, suspended, events);
   return deepFreeze({ conflict, affected: affectedAfterDiscovery });
 }
@@ -176,7 +189,9 @@ function suspensionEvent(
   conflict: ConflictRecord,
   actor: Actor,
   occurredAt: string,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
 ): ConflictSuspensionLifecycleEvent {
+  const reconciliation = assessEnforcementReconciliation(lesson, enforcementLinks);
   return deepFreeze({
     eventId: `${lesson.lessonId}:${lesson.revision}:suspended:${conflict.conflictId}`,
     lessonId: lesson.lessonId,
@@ -189,9 +204,7 @@ function suspensionEvent(
     occurredAt,
     reason: "active lesson suspended by credible harmful conflict",
     conflictId: conflict.conflictId,
-    unreconciledEnforcementLinks: lesson.approval.enforcementLinks
-      .filter(({ deploymentState }) => deploymentState !== "disabled" && deploymentState !== "removed")
-      .map(({ linkId }) => linkId),
+    unreconciledEnforcementLinks: reconciliation.unreconciledLinkIds,
     outcome: "completed",
   });
 }

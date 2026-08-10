@@ -1100,12 +1100,34 @@ test("an open blocking conflict prevents activation", () => {
 
 test("conflicting repository guidance is recorded, suspended, and resolved without losing history", () => {
   const active = activeCandidate();
+  const disabledControl = transitionEnforcementLink(active, active.approval.enforcementLinks[0]!, {
+    actor: { identity: "control-owner", authority: "control-owner", kind: "human" },
+    occurredAt: "2026-08-09T11:50:00.000Z",
+    deploymentState: "disabled",
+    verificationEvidence: {
+      evidenceId: "verification-conflicted-control-disabled",
+      kind: "disablement",
+      outcome: "passed",
+      verifiedAt: "2026-08-09T11:50:00.000Z",
+      immutableLocator: "sha256:verification-conflicted-control-disabled",
+    },
+    deployment: { version: "sha256:safe-publication-test-v1", deployedAt: "2026-08-09T10:24:00.000Z" },
+    reason: "Disable the affected control before suspending guidance.",
+  }, { replaceEnforcementLink() {} });
   const conflictingActive: ActiveLesson = {
     ...active,
     lessonId: "lesson_repository_shell_guidance",
     revisionId: "lesson_repository_shell_guidance:3",
     revision: 3,
     guidance: "Publish Markdown by constructing a shell command.",
+    approval: {
+      ...active.approval,
+      revisionId: "lesson_repository_shell_guidance:3",
+      enforcementLinks: active.approval.enforcementLinks.map((link) => ({
+        ...link,
+        implementedRevisionId: "lesson_repository_shell_guidance:3",
+      })),
+    },
   };
   const recorded: ConflictRecord[] = [];
   const suspended: RetiredLesson[] = [];
@@ -1138,7 +1160,10 @@ test("conflicting repository guidance is recorded, suspended, and resolved witho
       credibleHarm: true,
       owner: "platform-safety",
     },
-  }, sink);
+  }, sink, {
+    [active.revisionId]: [disabledControl],
+    [conflictingActive.revisionId]: conflictingActive.approval.enforcementLinks,
+  });
 
   assert.equal(outcome.conflict.status, "open");
   assert.deepEqual(recorded, [outcome.conflict]);
@@ -1150,6 +1175,9 @@ test("conflicting repository guidance is recorded, suspended, and resolved witho
   assert.equal(events[0]?.reason, "active lesson suspended by credible harmful conflict");
   assert.deepEqual(events[0] && "unreconciledEnforcementLinks" in events[0]
     ? events[0].unreconciledEnforcementLinks
+    : undefined, []);
+  assert.deepEqual(events[1] && "unreconciledEnforcementLinks" in events[1]
+    ? events[1].unreconciledEnforcementLinks
     : undefined, ["control-safe-publication-test"]);
 
   const history: ConflictRecord[] = [outcome.conflict];
@@ -1216,7 +1244,10 @@ test("replacement atomically activates the approved successor and supersedes its
     occurredAt: "2026-08-09T12:00:00.000Z",
     revisionId: successor.revisionId,
     regressionEvidence: ["regression-safe-publication-v2"],
-  }, sink);
+  }, sink, {
+    predecessor: predecessor.approval.enforcementLinks,
+    successor: successor.approval.enforcementLinks,
+  });
 
   assert.equal(replacement.predecessor.state, "superseded");
   assert.equal(replacement.predecessor.supersededByRevisionId, successor.revisionId);
@@ -1238,6 +1269,9 @@ test("a failure before the replacement commit leaves the predecessor active", ()
   }, {
     replaceActiveRevision() { commitCalled = true; },
     appendBlockedReplacement() {},
+  }, {
+    predecessor: predecessor.approval.enforcementLinks,
+    successor: successor.approval.enforcementLinks,
   }), CandidateTransitionError);
 
   assert.equal(commitCalled, false);
@@ -1263,6 +1297,9 @@ test("a failure inside the replacement commit cannot mutate either input revisio
       throw commitFailure;
     },
     appendBlockedReplacement() {},
+  }, {
+    predecessor: predecessor.approval.enforcementLinks,
+    successor: successor.approval.enforcementLinks,
   }), (error) => error === commitFailure);
 
   assert.deepEqual(visible, [predecessor]);
@@ -1298,7 +1335,7 @@ test("cross-lesson supersession atomically records bidirectional lineage to an a
     actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
     occurredAt: "2026-08-09T13:00:00.000Z",
     reason: "The replacement generalizes the publication-specific guidance.",
-  }, sink);
+  }, sink, predecessor.approval.enforcementLinks);
 
   assert.equal(outcome.superseded.supersededByLessonId, replacement.lessonId);
   assert.equal(outcome.superseded.supersededByRevisionId, replacement.revisionId);
@@ -1330,7 +1367,7 @@ test("cross-lesson supersession rejects a replacement that is not active", () =>
     reason: "The replacement generalizes the publication-specific guidance.",
   }, {
     supersedeWithActiveReplacement() { committed = true; },
-  }), CandidateTransitionError);
+  }, predecessor.approval.enforcementLinks), CandidateTransitionError);
 
   assert.equal(committed, false);
   assert.equal(selectConsumerGuidance(predecessor), predecessor.guidance);
@@ -1351,7 +1388,7 @@ test("retirement records its human disposition without naming a replacement", ()
     actor: { identity: "lesson-owner", authority: "lesson-retirer", kind: "human" },
     occurredAt: "2026-08-09T14:00:00.000Z",
     reason: "The guidance no longer applies to supported publication paths.",
-  }, sink);
+  }, sink, active.approval.enforcementLinks);
 
   assert.equal(retired.state, "retired");
   assert.equal(retired.retiredBy, "lesson-owner");
@@ -1376,7 +1413,7 @@ test("retirement requires a human actor", () => {
     reason: "The guidance no longer applies to supported publication paths.",
   }, {
     retireActiveRevision() { committed = true; },
-  }), CandidateValidationError);
+  }, active.approval.enforcementLinks), CandidateValidationError);
 
   assert.equal(committed, false);
   assert.equal(selectConsumerGuidance(active), active.guidance);
@@ -1461,7 +1498,7 @@ test("an overdue review alerts without changing active lesson semantics", () => 
   const outcome = evaluateActiveLessonDeadlines(active, {
     actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
     occurredAt: "2026-09-10T10:30:00.000Z",
-  }, sink);
+  }, sink, active.approval.enforcementLinks);
 
   assert.equal(outcome.lesson, active);
   assert.equal(outcome.overdueReview, true);
@@ -1512,7 +1549,7 @@ test("a completed review establishes the operative next review deadline", () => 
   const outcome = evaluateActiveLessonDeadlines(active, {
     actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
     occurredAt: "2026-09-11T11:00:00.000Z",
-  }, { applyDeadlineOutcome() {} }, completedReview);
+  }, { applyDeadlineOutcome() {} }, active.approval.enforcementLinks, completedReview);
 
   assert.equal(outcome.overdueReview, false);
 });
@@ -1531,7 +1568,8 @@ test("a future completed review cannot alter an earlier deadline evaluation", ()
   assert.throws(() => evaluateActiveLessonDeadlines(active, {
     actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
     occurredAt: "2026-09-09T11:00:00.000Z",
-  }, { applyDeadlineOutcome() { assert.fail("future review must not affect current deadlines"); } }, completedReview),
+  }, { applyDeadlineOutcome() { assert.fail("future review must not affect current deadlines"); } },
+  active.approval.enforcementLinks, completedReview),
   CandidateTransitionError);
 });
 
@@ -1545,7 +1583,7 @@ test("separate overdue alerts have distinct audit identities", () => {
     evaluateActiveLessonDeadlines(active, {
       actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
       occurredAt,
-    }, sink);
+    }, sink, active.approval.enforcementLinks);
   }
 
   assert.notEqual(eventIds[0], eventIds[1]);
@@ -1574,7 +1612,7 @@ test("passing hard expiry atomically retires guidance as expired", () => {
   const outcome = evaluateActiveLessonDeadlines(active, {
     actor: { identity: "lesson-scheduler", authority: "lesson-lifecycle", kind: "service" },
     occurredAt: "2026-11-09T10:30:00.000Z",
-  }, sink);
+  }, sink, active.approval.enforcementLinks);
 
   assert.equal(outcome.lesson.state, "retired");
   assert.equal(outcome.lesson.retirementReason, "expired");
