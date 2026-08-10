@@ -250,6 +250,50 @@ export const conflictResolutionCommandSchema = z.object({
   }
 });
 const enforcementDeploymentState = z.enum(["planned", "ready", "active", "drifted", "disabled", "removed"]);
+const enforcementVerificationEvidence = z.object({
+  evidenceId: ordinaryText,
+  kind: z.enum(["deployment", "drift", "disablement", "removal"]),
+  outcome: z.enum(["passed", "failed"]),
+  verifiedAt: isoInstant,
+  immutableLocator: ordinaryText,
+}).strict();
+const enforcementDeployment = z.object({
+  version: ordinaryText,
+  deployedAt: isoInstant,
+}).strict();
+type EnforcementStateInput = {
+  deploymentState: z.infer<typeof enforcementDeploymentState>;
+  verificationEvidence: z.infer<typeof enforcementVerificationEvidence> | null;
+  deployment: z.infer<typeof enforcementDeployment> | null;
+};
+
+function validateEnforcementState(
+  value: EnforcementStateInput,
+  context: { addIssue(issue: { code: "custom"; message: string }): void },
+) {
+  const expectedEvidence = {
+    ready: ["deployment", "passed"],
+    active: ["deployment", "passed"],
+    drifted: ["drift", "failed"],
+    disabled: ["disablement", "passed"],
+    removed: ["removal", "passed"],
+  } as const;
+  if (value.deploymentState === "planned") {
+    if (value.verificationEvidence || value.deployment) {
+      context.addIssue({ code: "custom", message: "a planned Enforcement Link cannot claim deployment evidence" });
+    }
+    return;
+  }
+  const expected = expectedEvidence[value.deploymentState];
+  if (!value.verificationEvidence
+    || value.verificationEvidence.kind !== expected[0]
+    || value.verificationEvidence.outcome !== expected[1]) {
+    context.addIssue({ code: "custom", message: `${value.deploymentState} requires matching verification evidence` });
+  }
+  if ((value.deploymentState === "ready" || value.deploymentState === "active") && !value.deployment) {
+    context.addIssue({ code: "custom", message: "a deployed Enforcement Link requires version and time" });
+  }
+}
 
 /** Runtime schema for one independently deployed lesson projection or control. */
 export const enforcementLinkSchema = z.object({
@@ -259,27 +303,11 @@ export const enforcementLinkSchema = z.object({
   owner: ordinaryText,
   implementedRevisionId: ordinaryText,
   deploymentState: enforcementDeploymentState,
-  verificationEvidence: sanitizedText.nullable(),
-  deployedVersion: ordinaryText.nullable(),
-  deployedAt: isoInstant.nullable(),
+  verificationEvidence: enforcementVerificationEvidence.nullable(),
+  deployment: enforcementDeployment.nullable(),
   bypassPolicy: sanitizedText,
   rollbackOperation: sanitizedText,
-}).strict().superRefine((link, context) => {
-  const deployed = link.deploymentState === "ready"
-    || link.deploymentState === "active"
-    || link.deploymentState === "drifted";
-  if (deployed && (!link.verificationEvidence || !link.deployedVersion || !link.deployedAt)) {
-    context.addIssue({ code: "custom", message: "a deployed Enforcement Link requires evidence, version, and time" });
-  }
-  if (link.deploymentState === "planned"
-    && (link.verificationEvidence || link.deployedVersion || link.deployedAt)) {
-    context.addIssue({ code: "custom", message: "a planned Enforcement Link cannot claim deployment evidence" });
-  }
-  if ((link.deploymentState === "disabled" || link.deploymentState === "removed")
-    && !link.verificationEvidence) {
-    context.addIssue({ code: "custom", message: "a reconciled Enforcement Link requires verification evidence" });
-  }
-});
+}).strict().superRefine(validateEnforcementState);
 const rollbackPlan = z.object({
   affectedProjections: z.array(ordinaryText).min(1),
   recoveryAction: sanitizedText,
@@ -363,27 +391,17 @@ export const enforcementLinkTransitionCommandSchema = z.object({
   actor,
   occurredAt: isoInstant,
   deploymentState: enforcementDeploymentState,
-  verificationEvidence: sanitizedText.nullable(),
-  deployedVersion: ordinaryText.nullable(),
-  deployedAt: isoInstant.nullable(),
+  verificationEvidence: enforcementVerificationEvidence.nullable(),
+  deployment: enforcementDeployment.nullable(),
   reason: sanitizedText,
 }).strict().superRefine((command, context) => {
-  const deployed = command.deploymentState === "ready"
-    || command.deploymentState === "active"
-    || command.deploymentState === "drifted";
-  if (deployed && (!command.verificationEvidence || !command.deployedVersion || !command.deployedAt)) {
-    context.addIssue({ code: "custom", message: "a deployed Enforcement Link requires evidence, version, and time" });
-  }
-  if (command.deploymentState === "planned"
-    && (command.verificationEvidence || command.deployedVersion || command.deployedAt)) {
-    context.addIssue({ code: "custom", message: "a planned Enforcement Link cannot claim deployment evidence" });
-  }
-  if ((command.deploymentState === "disabled" || command.deploymentState === "removed")
-    && !command.verificationEvidence) {
-    context.addIssue({ code: "custom", message: "a reconciled Enforcement Link requires verification evidence" });
-  }
-  if (command.deployedAt && Date.parse(command.deployedAt) > Date.parse(command.occurredAt)) {
+  validateEnforcementState(command, context);
+  if (command.deployment && Date.parse(command.deployment.deployedAt) > Date.parse(command.occurredAt)) {
     context.addIssue({ code: "custom", message: "an Enforcement Link cannot be deployed in the future" });
+  }
+  if (command.verificationEvidence
+    && Date.parse(command.verificationEvidence.verifiedAt) > Date.parse(command.occurredAt)) {
+    context.addIssue({ code: "custom", message: "Enforcement Link verification cannot occur in the future" });
   }
 });
 

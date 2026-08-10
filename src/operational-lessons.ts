@@ -163,6 +163,19 @@ export interface RegressionClaim {
 
 export type EnforcementDeploymentState = "planned" | "ready" | "active" | "drifted" | "disabled" | "removed";
 
+export interface EnforcementVerificationEvidence {
+  evidenceId: string;
+  kind: "deployment" | "drift" | "disablement" | "removal";
+  outcome: "passed" | "failed";
+  verifiedAt: string;
+  immutableLocator: string;
+}
+
+export interface EnforcementDeployment {
+  version: string;
+  deployedAt: string;
+}
+
 /** One independently deployed projection or control derived from an exact Lesson Revision. */
 export interface EnforcementLink {
   linkId: string;
@@ -171,9 +184,8 @@ export interface EnforcementLink {
   owner: string;
   implementedRevisionId: string;
   deploymentState: EnforcementDeploymentState;
-  verificationEvidence: string | null;
-  deployedVersion: string | null;
-  deployedAt: string | null;
+  verificationEvidence: EnforcementVerificationEvidence | null;
+  deployment: EnforcementDeployment | null;
   bypassPolicy: string;
   rollbackOperation: string;
 }
@@ -242,7 +254,6 @@ export interface ApprovedLesson extends CandidateLessonFields {
   state: "approved";
   reviewAssignment: Readonly<ReviewAssignment>;
   approval: Readonly<ApprovalRecord>;
-  enforcementLinks: readonly Readonly<EnforcementLink>[];
 }
 
 export interface NonDeterminismRationale {
@@ -274,9 +285,8 @@ export interface EnforcementLinkTransitionCommand {
   actor: Actor;
   occurredAt: string;
   deploymentState: EnforcementDeploymentState;
-  verificationEvidence: string | null;
-  deployedVersion: string | null;
-  deployedAt: string | null;
+  verificationEvidence: EnforcementVerificationEvidence | null;
+  deployment: EnforcementDeployment | null;
   reason: string;
 }
 
@@ -284,7 +294,6 @@ export interface ActiveLesson extends CandidateLessonFields {
   state: "active";
   reviewAssignment: Readonly<ReviewAssignment>;
   approval: Readonly<ApprovalRecord>;
-  enforcementLinks: readonly Readonly<EnforcementLink>[];
   activatedAt: string;
   replaces?: readonly Readonly<{ lessonId: string; revisionId: string }>[];
 }
@@ -294,7 +303,6 @@ export interface SupersededLesson extends CandidateLessonFields {
   state: "superseded";
   reviewAssignment: Readonly<ReviewAssignment>;
   approval: Readonly<ApprovalRecord>;
-  enforcementLinks: readonly Readonly<EnforcementLink>[];
   activatedAt: string;
   supersededAt: string;
   supersededByLessonId: string;
@@ -311,7 +319,6 @@ export interface RetiredLesson extends CandidateLessonFields {
   state: "retired";
   reviewAssignment: Readonly<ReviewAssignment>;
   approval: Readonly<ApprovalRecord>;
-  enforcementLinks: readonly Readonly<EnforcementLink>[];
   activatedAt: string;
   retiredAt: string;
   retiredBy: string;
@@ -539,9 +546,8 @@ export interface EnforcementLinkLifecycleEvent {
   actorKind: Actor["kind"];
   occurredAt: string;
   reason: string;
-  verificationEvidence: string | null;
-  deployedVersion: string | null;
-  deployedAt: string | null;
+  verificationEvidence: Readonly<EnforcementVerificationEvidence> | null;
+  deployment: Readonly<EnforcementDeployment> | null;
   outcome: "completed";
 }
 
@@ -725,12 +731,13 @@ export interface ActivationSink {
   appendBlockedActivation(event: BlockedActivationLifecycleEvent): void;
 }
 
-type LessonWithEnforcementLinks = ApprovedLesson | ActiveLesson | SupersededLesson | RetiredLesson;
+type GovernedLesson = ApprovedLesson | ActiveLesson | SupersededLesson | RetiredLesson;
 
 /** Atomic boundary for replacing one control record and appending its audit event. */
 export interface EnforcementLinkSink {
   replaceEnforcementLink(
-    lesson: LessonWithEnforcementLinks,
+    prior: Readonly<EnforcementLink>,
+    updated: Readonly<EnforcementLink>,
     event: EnforcementLinkLifecycleEvent,
   ): void;
 }
@@ -1087,8 +1094,10 @@ export function approveCandidate(
   const enforcementIsBound = parsed.success
     && new Set(parsed.data.enforcementLinks.map(({ linkId }) => linkId)).size === parsed.data.enforcementLinks.length
     && parsed.data.enforcementLinks.every(({ implementedRevisionId }) => implementedRevisionId === candidate.revisionId)
-    && parsed.data.enforcementLinks.every(({ deployedAt }) =>
-      !deployedAt || Date.parse(deployedAt) <= Date.parse(parsed.data.occurredAt))
+    && parsed.data.enforcementLinks.every(({ deployment, verificationEvidence }) =>
+      (!deployment || Date.parse(deployment.deployedAt) <= Date.parse(parsed.data.occurredAt))
+      && (!verificationEvidence
+        || Date.parse(verificationEvidence.verifiedAt) <= Date.parse(parsed.data.occurredAt)))
     && parsed.data.requiredEnforcementClasses.every((controlClass) =>
       parsed.data.enforcementLinks.some((link) => link.controlClass === controlClass));
   const severeExceptionIsValid = parsed.success && (!parsed.data.severeFirstOccurrence
@@ -1144,7 +1153,6 @@ export function approveCandidate(
     ...candidate,
     state: "approved" as const,
     approval,
-    enforcementLinks: command.enforcementLinks,
   });
   const event = deepFreeze({
     eventId: `${candidate.lessonId}:${candidate.revision}:approved`,
@@ -1169,6 +1177,7 @@ export function activateApprovedLesson(
   approved: ApprovedLesson,
   input: unknown,
   sink: ActivationSink,
+  enforcementLinks: readonly Readonly<EnforcementLink>[] = approved.approval.enforcementLinks,
 ): ActiveLesson {
   const parsed = activationCommandSchema.safeParse(input);
   const attempt = activationAttemptContextSchema.safeParse(input);
@@ -1176,6 +1185,7 @@ export function activateApprovedLesson(
   const approval = approved.approval;
   const approvalIsCurrent = command?.revisionId === approved.revisionId
     && approval.revisionId === approved.revisionId;
+  const enforcementLinksAreBound = enforcementLinksMatchApproval(approved, enforcementLinks);
   const regressionEvidenceIsValid = Boolean(command && (
     command.regressionEvidence?.every((evidenceId) => approval.evidenceReferences.some((reference) =>
       reference.evidenceId === evidenceId
@@ -1192,7 +1202,7 @@ export function activateApprovedLesson(
       && conflict.exceptionExpiresAt
       && Date.parse(conflict.exceptionExpiresAt) > Date.parse(command.occurredAt))));
   const enforcementIsReady = Boolean(command && approval.requiredEnforcementClasses.every((controlClass) => {
-    const readyLink = approved.enforcementLinks.some((link) =>
+    const readyLink = enforcementLinks.some((link) =>
       link.controlClass === controlClass
       && link.implementedRevisionId === approved.revisionId
       && (link.deploymentState === "ready" || link.deploymentState === "active"));
@@ -1207,7 +1217,7 @@ export function activateApprovedLesson(
     && (!approval.expiresAt || Date.parse(command.occurredAt) < Date.parse(approval.expiresAt)));
 
   if (!parsed.success || !approvalIsCurrent || !regressionEvidenceIsValid
-    || !hasNoOpenBlockingConflict || !enforcementIsReady || !timingIsValid) {
+    || !hasNoOpenBlockingConflict || !enforcementLinksAreBound || !enforcementIsReady || !timingIsValid) {
     if (!attempt.success) {
       throw new CandidateValidationError(parsed.success
         ? "invalid activation actor context"
@@ -1254,51 +1264,49 @@ export function activateApprovedLesson(
   return active;
 }
 
-/** Advances or reconciles one Enforcement Link without rewriting lesson semantics or sibling controls. */
-export function transitionEnforcementLink<Lesson extends LessonWithEnforcementLinks>(
-  lesson: Lesson,
-  linkId: string,
+/** Advances or reconciles one Enforcement Link without rewriting its immutable Lesson Version. */
+export function transitionEnforcementLink(
+  lesson: GovernedLesson,
+  prior: Readonly<EnforcementLink>,
   input: unknown,
   sink: EnforcementLinkSink,
-): Lesson {
+): EnforcementLink {
   const parsed = enforcementLinkTransitionCommandSchema.safeParse(input);
   if (!parsed.success) {
     throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
   }
   const command: EnforcementLinkTransitionCommand = parsed.data;
-  const prior = lesson.enforcementLinks.find((link) => link.linkId === linkId);
-  if (!prior) throw new CandidateTransitionError("the Enforcement Link does not belong to this Lesson Revision");
+  if (!linkMatchesApprovedContract(lesson, prior)) {
+    throw new CandidateTransitionError("the Enforcement Link does not belong to this Lesson Revision");
+  }
   if (prior.deploymentState === "removed" && command.deploymentState !== "removed") {
     throw new CandidateTransitionError("a removed Enforcement Link cannot be redeployed");
+  }
+  if ((lesson.state === "superseded" || lesson.state === "retired")
+    && command.deploymentState !== "disabled" && command.deploymentState !== "removed") {
+    throw new CandidateTransitionError("a terminal Lesson Version cannot redeploy an Enforcement Link");
   }
   if (Date.parse(command.occurredAt) < Date.parse(lesson.approval.approvedAt)) {
     throw new CandidateTransitionError("an Enforcement Link transition cannot predate lesson approval");
   }
-  if ((prior.deployedVersion || prior.deployedAt) && (!command.deployedVersion || !command.deployedAt)) {
+  if (prior.deployment && !command.deployment) {
     throw new CandidateTransitionError("an Enforcement Link transition cannot erase deployment provenance");
   }
 
-  const enforcementLinks = lesson.enforcementLinks.map((link) => link.linkId === linkId
-    ? deepFreeze({
-      ...link,
-      deploymentState: command.deploymentState,
-      verificationEvidence: command.verificationEvidence,
-      deployedVersion: command.deployedVersion,
-      deployedAt: command.deployedAt,
-    })
-    : link);
   const updated = deepFreeze({
-    ...lesson,
-    enforcementLinks,
+    ...prior,
+    deploymentState: command.deploymentState,
+    verificationEvidence: command.verificationEvidence,
+    deployment: command.deployment,
   });
   const event = deepFreeze({
-    eventId: `${lesson.lessonId}:${lesson.revision}:enforcement:${linkId}:${command.occurredAt}`,
+    eventId: `${lesson.lessonId}:${lesson.revision}:enforcement:${prior.linkId}:${command.occurredAt}`,
     lessonId: lesson.lessonId,
     revision: lesson.revision,
     lessonState: lesson.state,
     fromState: lesson.state,
     toState: lesson.state,
-    linkId,
+    linkId: prior.linkId,
     target: prior.target,
     fromDeploymentState: prior.deploymentState,
     toDeploymentState: command.deploymentState,
@@ -1308,11 +1316,10 @@ export function transitionEnforcementLink<Lesson extends LessonWithEnforcementLi
     occurredAt: command.occurredAt,
     reason: command.reason,
     verificationEvidence: command.verificationEvidence,
-    deployedVersion: command.deployedVersion,
-    deployedAt: command.deployedAt,
+    deployment: command.deployment,
     outcome: "completed" as const,
   });
-  sink.replaceEnforcementLink(updated, event);
+  sink.replaceEnforcementLink(prior, updated, event);
   return updated;
 }
 
@@ -1322,6 +1329,10 @@ export function replaceActiveLesson(
   approvedSuccessor: ApprovedLesson,
   input: unknown,
   sink: ReplacementSink,
+  enforcementLinks: {
+    predecessor?: readonly Readonly<EnforcementLink>[];
+    successor?: readonly Readonly<EnforcementLink>[];
+  } = {},
 ): { predecessor: SupersededLesson; successor: ActiveLesson } {
   let replacement: { predecessor: SupersededLesson; successor: ActiveLesson } | undefined;
   activateApprovedLesson(approvedSuccessor, input, {
@@ -1331,9 +1342,12 @@ export function replaceActiveLesson(
         sink.appendBlockedReplacement(toBlockedReplacement(activationEvent));
         throw new CandidateTransitionError("replacement successor does not descend from the active revision");
       }
-      const reconciliation = exposeUnreconciledEnforcementDrift(predecessor);
+      const reconciliation = assessEnforcementReconciliation(
+        predecessor,
+        enforcementLinks.predecessor ?? predecessor.approval.enforcementLinks,
+      );
       const superseded = deepFreeze({
-        ...reconciliation.lesson,
+        ...predecessor,
         state: "superseded" as const,
         supersededAt: activationEvent.occurredAt,
         supersededByLessonId: successor.lessonId,
@@ -1351,7 +1365,7 @@ export function replaceActiveLesson(
     appendBlockedActivation(event) {
       sink.appendBlockedReplacement(toBlockedReplacement(event));
     },
-  });
+  }, enforcementLinks.successor ?? approvedSuccessor.approval.enforcementLinks);
   if (!replacement) throw new CandidateTransitionError("replacement was not committed");
   return replacement;
 }
@@ -1362,6 +1376,7 @@ export function supersedeActiveLessonAcrossLessons(
   replacement: OperationalLesson,
   input: unknown,
   sink: CrossLessonSupersessionSink,
+  enforcementLinks: readonly Readonly<EnforcementLink>[] = predecessor.approval.enforcementLinks,
 ): { superseded: SupersededLesson; replacement: ActiveReplacementLesson } {
   const command = parseTerminalDispositionCommand(input);
   if (replacement.state !== "active"
@@ -1370,9 +1385,9 @@ export function supersedeActiveLessonAcrossLessons(
     throw new CandidateTransitionError("cross-lesson replacement must be an approved active revision");
   }
 
-  const reconciliation = exposeUnreconciledEnforcementDrift(predecessor);
+  const reconciliation = assessEnforcementReconciliation(predecessor, enforcementLinks);
   const superseded = deepFreeze({
-    ...reconciliation.lesson,
+    ...predecessor,
     state: "superseded" as const,
     supersededAt: command.occurredAt,
     supersededByLessonId: replacement.lessonId,
@@ -1411,11 +1426,12 @@ export function retireActiveLesson(
   active: ActiveLesson,
   input: unknown,
   sink: RetirementSink,
+  enforcementLinks: readonly Readonly<EnforcementLink>[] = active.approval.enforcementLinks,
 ): RetiredLesson {
   const command = parseTerminalDispositionCommand(input);
-  const reconciliation = exposeUnreconciledEnforcementDrift(active);
+  const reconciliation = assessEnforcementReconciliation(active, enforcementLinks);
   const retired = deepFreeze({
-    ...reconciliation.lesson,
+    ...active,
     state: "retired" as const,
     retiredAt: command.occurredAt,
     retiredBy: command.actor.identity,
@@ -1446,6 +1462,7 @@ export function evaluateActiveLessonDeadlines(
   input: unknown,
   sink: ActiveLessonDeadlineSink,
   latestReview?: ActiveLessonReviewLifecycleEvent,
+  enforcementLinks: readonly Readonly<EnforcementLink>[] = active.approval.enforcementLinks,
 ): { lesson: ActiveLesson | RetiredLesson; overdueReview: boolean } {
   const parsed = activeLessonDeadlineCommandSchema.safeParse(input);
   if (!parsed.success) {
@@ -1485,9 +1502,9 @@ export function evaluateActiveLessonDeadlines(
 
   let lesson: ActiveLesson | RetiredLesson = active;
   if (expiresAt && occurredAt >= Date.parse(expiresAt)) {
-    const reconciliation = exposeUnreconciledEnforcementDrift(active);
+    const reconciliation = assessEnforcementReconciliation(active, enforcementLinks);
     lesson = deepFreeze({
-      ...reconciliation.lesson,
+      ...active,
       state: "retired" as const,
       retiredAt: command.occurredAt,
       retiredBy: command.actor.identity,
@@ -1736,19 +1753,38 @@ function isAuthorizedAttestation(
     && Date.parse(attestation.approvedAt) <= Date.parse(occurredAt);
 }
 
-/** Marks every non-terminal control as visible drift when its governing lesson stops applying. */
-export function exposeUnreconciledEnforcementDrift<Lesson extends LessonWithEnforcementLinks>(lesson: Lesson) {
-  const unreconciledLinkIds = lesson.enforcementLinks
+function linkMatchesApprovedContract(lesson: GovernedLesson, link: Readonly<EnforcementLink>) {
+  const approved = lesson.approval.enforcementLinks.find(({ linkId }) => linkId === link.linkId);
+  return Boolean(approved
+    && link.controlClass === approved.controlClass
+    && link.target === approved.target
+    && link.owner === approved.owner
+    && link.implementedRevisionId === approved.implementedRevisionId
+    && link.bypassPolicy === approved.bypassPolicy
+    && link.rollbackOperation === approved.rollbackOperation);
+}
+
+function enforcementLinksMatchApproval(
+  lesson: GovernedLesson,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
+) {
+  return enforcementLinks.length === lesson.approval.enforcementLinks.length
+    && new Set(enforcementLinks.map(({ linkId }) => linkId)).size === enforcementLinks.length
+    && enforcementLinks.every((link) => linkMatchesApprovedContract(lesson, link));
+}
+
+/** Detects every linked control that still lacks verified disablement or removal. */
+function assessEnforcementReconciliation(
+  lesson: GovernedLesson,
+  enforcementLinks: readonly Readonly<EnforcementLink>[],
+) {
+  if (!enforcementLinksMatchApproval(lesson, enforcementLinks)) {
+    throw new CandidateTransitionError("reconciliation requires every Enforcement Link for the exact Lesson Revision");
+  }
+  const unreconciledLinkIds = enforcementLinks
     .filter(({ deploymentState }) => deploymentState !== "disabled" && deploymentState !== "removed")
     .map(({ linkId }) => linkId);
-  const unresolved = new Set(unreconciledLinkIds);
-  const enforcementLinks = lesson.enforcementLinks.map((link) => unresolved.has(link.linkId)
-    ? deepFreeze({ ...link, deploymentState: "drifted" as const })
-    : link);
-  return deepFreeze({
-    lesson: { ...lesson, enforcementLinks },
-    unreconciledLinkIds,
-  });
+  return deepFreeze({ unreconciledLinkIds });
 }
 
 // Captured records own their parsed values, so recursive freezing cannot mutate caller input.
