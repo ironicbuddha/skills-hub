@@ -71,6 +71,44 @@ import {
   type ConflictResolutionSink,
 } from "../src/operational-lesson-conflicts.ts";
 
+const SOURCE_CONTENT_DIGEST = `sha256:${"a".repeat(64)}`;
+const REGRESSION_CONTENT_DIGEST = `sha256:${"b".repeat(64)}`;
+const DELETED_CONTENT_DIGEST = `sha256:${"c".repeat(64)}`;
+
+function retentionDeletionCommand(occurredAt: string) {
+  return {
+    actor: { identity: "retention-service", authority: "evidence-retention", kind: "service" as const },
+    occurredAt,
+    contentDigest: DELETED_CONTENT_DIGEST,
+    reason: "The declared retention period elapsed.",
+  };
+}
+
+function expectedEvidenceTombstone() {
+  return {
+    evidenceId: "evidence-42", kind: "source", supportedRevision: 1,
+    sanitizedSummary: "Protected incident record for the failed publication.",
+    classification: "confidential", accessBoundary: "incident-reviewers",
+    observedAt: "2026-08-09T09:55:00.000Z", collector: "capture-agent",
+    contentDigest: DELETED_CONTENT_DIGEST, retention: "365d",
+    deletedAt: "2027-08-09T10:00:00.000Z", deletedBy: "retention-service",
+    deletionAuthority: "evidence-retention", deletionActorKind: "service",
+    deletionReason: "The declared retention period elapsed.",
+  };
+}
+
+function expectedEvidenceRetentionEvent() {
+  return {
+    eventId: "evidence-42:1:retention-deleted:2027-08-09T10:00:00.000Z",
+    evidenceId: "evidence-42", fromState: "available", toState: "retention-deleted",
+    revision: 1, supportedRevision: 1, actor: "retention-service",
+    actorAuthority: "evidence-retention", actorKind: "service",
+    occurredAt: "2027-08-09T10:00:00.000Z",
+    reason: "evidence deleted under retention policy", contentDigest: DELETED_CONTENT_DIGEST,
+    outcome: "completed",
+  };
+}
+
 function captureSink(
   revisions: CandidateLesson[] = [],
   events: LifecycleEvent[] = [],
@@ -427,8 +465,8 @@ function approveRollback(rollback: UnderReviewRollbackLesson) {
   });
 }
 
-function harmfulRollbackFixture() {
-  const safeActive = activeCandidate();
+function harmfulRollbackFixture(schemaVersion: CaptureCandidateCommand["schemaVersion"] = "1.0") {
+  const safeActive = activeCandidate(schemaVersion);
   const priorEvents: LifecycleEvent[] = [];
   const harmfulApproved = approvedSuccessor(safeActive, {
     guidance: "Publish Markdown by constructing a shell command.",
@@ -472,6 +510,116 @@ function activateRollback(approved: ReturnType<typeof approveRollback>) {
   }, { activateAsSoleRevision() {}, appendBlockedActivation() {} }, approved.approval.enforcementLinks);
 }
 
+function assertVersionedLifecycleAndProvenance(schemaVersion: CaptureCandidateCommand["schemaVersion"]) {
+  const captureEvents: LifecycleEvent[] = [];
+  const captured = captureCandidate({ ...command(), schemaVersion }, {
+    appendCapture(_revision, event) { captureEvents.push(event); },
+  });
+  const underReview = reviewedCandidate(schemaVersion);
+  const rejected = rejectCandidate(underReview, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-08-09T10:20:00.000Z",
+    disposition: "rejected",
+    reason: "The evidence does not support the proposed scope.",
+  }, { appendRejection() {}, appendBlockedRejection() {} });
+  const approved = approvedCandidate({}, schemaVersion);
+  const active = activeCandidate(schemaVersion);
+  const retired = retireActiveLesson(active, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    reason: "The guidance is no longer applicable.",
+  }, { retireActiveRevision() {} }, active.approval.enforcementLinks);
+
+  assert.deepEqual(new Set([captured.state, underReview.state, rejected.state, approved.state, active.state, retired.state]),
+    new Set(["captured", "under_review", "rejected", "approved", "active", "retired"]));
+  assert.equal(captured.createdBy, "capture-agent");
+  assert.equal(captureEvents[0]?.actorAuthority, "incident-capture");
+  assert.equal(Object.isFrozen(captured), true);
+}
+
+function assertVersionedConflictGate(schemaVersion: CaptureCandidateCommand["schemaVersion"]) {
+  const conflict = {
+    conflictId: `conflict-${schemaVersion}`,
+    lessonRevisions: [
+      { lessonId: "lesson_publication_boundary", revisionId: "lesson_publication_boundary:1" },
+      { lessonId: "lesson_other", revisionId: "lesson_other:1" },
+    ],
+    overlappingScope: "Repository Markdown publication.",
+    contradictoryObligations: ["Use the shell interpreter.", "Never use the shell interpreter."],
+    discoveredAt: "2026-08-09T10:20:00.000Z",
+    discoveredBy: "human-reviewer",
+    discoveryProvenance: "repository-guidance-review-17",
+    severity: "high" as const,
+    blocking: true,
+    credibleHarm: true,
+    status: "open" as const,
+    owner: "platform-safety",
+    resolutionRationale: null,
+    resolutionAuthority: null,
+    exceptionExpiresAt: null,
+    resultingLessonRevisions: [],
+  };
+  const approved = approvedCandidate({ conflictReferences: [conflict.conflictId], conflictRecords: [conflict] }, schemaVersion);
+  const blockedEvents: LifecycleEvent[] = [];
+  assert.throws(() => activateApprovedLesson(approved, activationCommand(), {
+    activateAsSoleRevision() { assert.fail("schema evolution cannot weaken Conflict gates"); },
+    appendBlockedActivation(event) { blockedEvents.push(event); },
+  }, approved.approval.enforcementLinks), CandidateTransitionError);
+  assert.equal(blockedEvents[0]?.actorKind, "service");
+  assert.equal(blockedEvents[0]?.actorAuthority, "lesson-activator");
+}
+
+function assertVersionedAtomicReplacement(schemaVersion: CaptureCandidateCommand["schemaVersion"]) {
+  const active = activeCandidate(schemaVersion);
+  const successor = approvedSuccessor(active);
+  const input = {
+    ...activationCommand(),
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    revisionId: successor.revisionId,
+    regressionEvidence: ["regression-safe-publication-v2"],
+  };
+  const enforcementLinks = {
+    predecessor: active.approval.enforcementLinks,
+    successor: successor.approval.enforcementLinks,
+  };
+  assert.throws(() => replaceActiveLesson(active, successor, input, {
+    replaceActiveRevision() { throw new Error("injected commit failure"); },
+    appendBlockedReplacement() {},
+  }, enforcementLinks), /injected commit failure/u);
+  assert.equal(active.state, "active");
+  assert.equal(successor.state, "approved");
+
+  let commits = 0;
+  const replacement = replaceActiveLesson(active, successor, input, {
+    replaceActiveRevision() { commits++; }, appendBlockedReplacement() {},
+  }, enforcementLinks);
+  assert.equal(replacement.predecessor.state, "superseded");
+  assert.equal(replacement.successor.schemaVersion, schemaVersion);
+  assert.strictEqual(replacement.successor.evidenceReferences[0], active.evidenceReferences[0]);
+  assert.equal(commits, 1);
+  assert.equal(selectConsumerGuidance(replacement.predecessor), null);
+  assert.equal(selectConsumerGuidance(replacement.successor), successor.guidance);
+}
+
+function assertVersionedRetentionAndRollback(schemaVersion: CaptureCandidateCommand["schemaVersion"]) {
+  const reference = captureCandidate({ ...command(), schemaVersion }, captureSink()).evidenceReferences[0]!;
+  const tombstone = deleteEvidenceForRetention(
+    reference,
+    retentionDeletionCommand("2027-08-09T10:00:00.000Z"),
+    { replaceEvidenceWithTombstone() {} },
+  );
+  const { safeSource, harmfulActive, disabledControl } = harmfulRollbackFixture(schemaVersion);
+  const initiated = initiateLessonRollback(harmfulActive, safeSource, rollbackCommand(), {
+    commitRollback() {},
+  }, [disabledControl]);
+  const activated = activateRollback(approveRollback(initiated.rollback));
+
+  assert.equal(tombstone.supportedRevision, reference.supportedRevision);
+  assert.equal(activated.schemaVersion, schemaVersion);
+  assert.equal(initiated.defective.state, "retired");
+  assert.strictEqual(initiated.rollback.evidenceReferences[0], safeSource.evidenceReferences[0]);
+}
+
 test("capture creates immutable revision 1 and an append-only event", () => {
   const revisions: CandidateLesson[] = [];
   const events: LifecycleEvent[] = [];
@@ -509,7 +657,7 @@ test("Evidence References support every kind with an immutable locator or digest
   const { immutableLocator: _locator, ...sourceEvidence } = command().evidenceReferences[0]!;
   const captured = captureCandidate({
     ...command(),
-    evidenceReferences: [{ ...sourceEvidence, contentDigest: "sha256:source-evidence-42" }],
+    evidenceReferences: [{ ...sourceEvidence, contentDigest: SOURCE_CONTENT_DIGEST }],
   }, captureSink());
   const approval = approvalCommand();
   const { immutableLocator: _regressionLocator, ...regressionEvidence } = {
@@ -521,19 +669,25 @@ test("Evidence References support every kind with an immutable locator or digest
     ...approval,
     evidenceReferences: [
       approval.evidenceReferences[0],
-      { ...regressionEvidence, contentDigest: "sha256:regression-evidence-42" },
+      { ...regressionEvidence, contentDigest: REGRESSION_CONTENT_DIGEST },
     ],
   }, { appendApproval() {}, appendBlockedApproval() {} });
 
   assert.equal(captured.evidenceReferences[0]?.kind, "source");
-  assert.equal(captured.evidenceReferences[0]?.contentDigest, "sha256:source-evidence-42");
+  assert.equal(captured.evidenceReferences[0]?.contentDigest, SOURCE_CONTENT_DIGEST);
   assert.deepEqual(approved.approval.evidenceReferences.map(({ kind }) => kind), ["recurrence", "regression"]);
-  assert.equal(approved.approval.evidenceReferences[1]?.contentDigest, "sha256:regression-evidence-42");
+  assert.equal(approved.approval.evidenceReferences[1]?.contentDigest, REGRESSION_CONTENT_DIGEST);
 
   const { immutableLocator: _missingLocator, ...unlocatable } = command().evidenceReferences[0]!;
   assert.throws(
     () => captureCandidate({ ...command(), evidenceReferences: [unlocatable] }, captureSink()),
     /immutable locator or digest/u,
+  );
+  assert.throws(
+    () => captureCandidate({
+      ...command(), evidenceReferences: [{ ...unlocatable, contentDigest: "latest" }],
+    }, captureSink()),
+    /canonical SHA-256 digest/u,
   );
 });
 
@@ -552,52 +706,33 @@ test("material revisions preserve immutable Evidence Reference lineage", () => {
 
 test("retention deletion atomically replaces evidence with an immutable tombstone and digest", () => {
   const reference = captureCandidate(command(), captureSink()).evidenceReferences[0]!;
-  let write:
+  let retentionReplacementWrite:
     | Parameters<EvidenceRetentionSink["replaceEvidenceWithTombstone"]>
     | undefined;
 
-  const tombstone = deleteEvidenceForRetention(reference, {
-    actor: { identity: "retention-service", authority: "evidence-retention", kind: "service" },
-    occurredAt: "2027-08-09T10:00:00.000Z",
-    contentDigest: "sha256:deleted-evidence-42",
-    reason: "The declared retention period elapsed.",
-  }, {
-    replaceEvidenceWithTombstone(...records) { write = records; },
+  assert.throws(() => deleteEvidenceForRetention(
+    reference,
+    retentionDeletionCommand("2026-08-10T10:00:00.000Z"),
+    { replaceEvidenceWithTombstone() {} },
+  ), /before its retention period elapses/u);
+  assert.throws(() => deleteEvidenceForRetention(reference, {
+    ...retentionDeletionCommand("2027-08-09T10:00:00.000Z"),
+    actor: { identity: "capture-agent", authority: "incident-capture", kind: "agent" },
+  }, { replaceEvidenceWithTombstone() {} }), CandidateValidationError);
+
+  const tombstone = deleteEvidenceForRetention(reference, retentionDeletionCommand(
+    "2027-08-09T10:00:00.000Z",
+  ), {
+    replaceEvidenceWithTombstone(...records) { retentionReplacementWrite = records; },
   });
 
-  assert.deepEqual(tombstone, {
-    evidenceId: "evidence-42",
-    kind: "source",
-    supportedRevision: 1,
-    sanitizedSummary: "Protected incident record for the failed publication.",
-    classification: "confidential",
-    accessBoundary: "incident-reviewers",
-    observedAt: "2026-08-09T09:55:00.000Z",
-    collector: "capture-agent",
-    contentDigest: "sha256:deleted-evidence-42",
-    retention: "365d",
-    deletedAt: "2027-08-09T10:00:00.000Z",
-    deletedBy: "retention-service",
-    deletionAuthority: "evidence-retention",
-    deletionActorKind: "service",
-    deletionReason: "The declared retention period elapsed.",
-  });
-  assert.strictEqual(write?.[0], reference);
-  assert.strictEqual(write?.[1], tombstone);
-  assert.deepEqual(write?.[2], {
-    eventId: "evidence-42:1:retention-deleted:2027-08-09T10:00:00.000Z",
-    evidenceId: "evidence-42",
-    supportedRevision: 1,
-    actor: "retention-service",
-    actorAuthority: "evidence-retention",
-    actorKind: "service",
-    occurredAt: "2027-08-09T10:00:00.000Z",
-    reason: "evidence deleted under retention policy",
-    contentDigest: "sha256:deleted-evidence-42",
-    outcome: "completed",
-  });
+  assert.deepEqual(tombstone, expectedEvidenceTombstone());
+  assert.strictEqual(retentionReplacementWrite?.[0], reference);
+  assert.strictEqual(retentionReplacementWrite?.[1], tombstone);
+  const auditEvent: LifecycleEvent | undefined = retentionReplacementWrite?.[2];
+  assert.deepEqual(auditEvent, expectedEvidenceRetentionEvent());
   assert.equal(Object.isFrozen(tombstone), true);
-  assert.equal(Object.isFrozen(write?.[2]), true);
+  assert.equal(Object.isFrozen(auditEvent), true);
   assert.equal(reference.immutableLocator, "sha256:8d12");
 });
 
@@ -681,69 +816,10 @@ test("provenance requires strict ISO date-times", () => {
 
 test("supported schema versions preserve lifecycle, governance, and atomic replacement invariants", () => {
   for (const schemaVersion of SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS) {
-    const active = activeCandidate(schemaVersion);
-    const conflict = {
-      conflictId: `conflict-${schemaVersion}`,
-      lessonRevisions: [
-        { lessonId: active.lessonId, revisionId: active.revisionId },
-        { lessonId: "lesson_other", revisionId: "lesson_other:1" },
-      ],
-      overlappingScope: "Repository Markdown publication.",
-      contradictoryObligations: ["Use the shell interpreter.", "Never use the shell interpreter."],
-      discoveredAt: "2026-08-09T10:20:00.000Z",
-      discoveredBy: "human-reviewer",
-      discoveryProvenance: "repository-guidance-review-17",
-      severity: "high" as const,
-      blocking: true,
-      credibleHarm: true,
-      status: "open" as const,
-      owner: "platform-safety",
-      resolutionRationale: null,
-      resolutionAuthority: null,
-      exceptionExpiresAt: null,
-      resultingLessonRevisions: [],
-    };
-    const conflictBlocked = approvedCandidate({
-      conflictReferences: [conflict.conflictId],
-      conflictRecords: [conflict],
-    }, schemaVersion);
-    const blockedEvents: LifecycleEvent[] = [];
-
-    assert.throws(() => activateApprovedLesson(conflictBlocked, activationCommand(), {
-      activateAsSoleRevision() { assert.fail("schema evolution cannot weaken Conflict gates"); },
-      appendBlockedActivation(event) { blockedEvents.push(event); },
-    }, conflictBlocked.approval.enforcementLinks), CandidateTransitionError);
-
-    const successor = approvedSuccessor(active);
-    let commits = 0;
-    const replacement = replaceActiveLesson(active, successor, {
-      ...activationCommand(),
-      occurredAt: "2026-08-09T12:00:00.000Z",
-      revisionId: successor.revisionId,
-      regressionEvidence: ["regression-safe-publication-v2"],
-    }, {
-      replaceActiveRevision(predecessor, activated) {
-        commits++;
-        assert.equal(predecessor.state, "superseded");
-        assert.equal(activated.state, "active");
-      },
-      appendBlockedReplacement() {},
-    }, {
-      predecessor: active.approval.enforcementLinks,
-      successor: successor.approval.enforcementLinks,
-    });
-
-    assert.equal(active.schemaVersion, schemaVersion);
-    assert.equal(replacement.successor.schemaVersion, schemaVersion);
-    assert.equal(Object.isFrozen(active), true);
-    assert.equal(active.approval.approver, "human-reviewer");
-    assert.equal(active.approval.authority, "lesson-approver");
-    assert.equal(active.approval.enforcementLinks[0]?.deploymentState, "ready");
-    assert.equal(blockedEvents[0]?.actorKind, "service");
-    assert.equal(blockedEvents[0]?.actorAuthority, "lesson-activator");
-    assert.equal(commits, 1);
-    assert.equal(selectConsumerGuidance(replacement.predecessor), null);
-    assert.equal(selectConsumerGuidance(replacement.successor), successor.guidance);
+    assertVersionedLifecycleAndProvenance(schemaVersion);
+    assertVersionedConflictGate(schemaVersion);
+    assertVersionedAtomicReplacement(schemaVersion);
+    assertVersionedRetentionAndRollback(schemaVersion);
   }
 
   assert.throws(

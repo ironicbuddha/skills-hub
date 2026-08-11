@@ -2,6 +2,7 @@ import { z } from "zod";
 
 /** Explicitly compatible revisions of the storage-neutral lifecycle contract. */
 export const SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS = ["1.0", "1.1"] as const;
+/** Runtime validator for supported Operational Lesson schema versions. */
 export const operationalLessonSchemaVersion = z.enum(
   SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS,
   { error: "unsupported Operational Lesson schema version" },
@@ -34,6 +35,19 @@ export const ordinaryText = z
 export const sanitizedText = ordinaryText
   .refine((value) => !/[\r\n\0]/u.test(value), "sanitized facts must be single-line text");
 
+/** Canonical SHA-256 digest used when evidence content cannot remain available. */
+export const contentDigestSchema = z.string().regex(
+  /^sha256:[a-f0-9]{64}$/u,
+  "content digest must be a canonical SHA-256 digest",
+).brand<"ContentDigest">();
+/** Canonical, algorithm-qualified digest of protected evidence content. */
+export type ContentDigest = z.infer<typeof contentDigestSchema>;
+
+const evidenceRetention = z.union([
+  z.string().regex(/^[1-9]\d*[dhm]$/u),
+  isoInstant,
+], { error: "evidence retention must be a positive duration or ISO expiry" });
+
 const factClass = z.enum(["operation", "observed-outcome", "trust-boundary", "impact"]);
 /** Shared lifecycle actor schema. */
 export const actor = z
@@ -61,8 +75,8 @@ const evidenceReferenceFields = {
   observedAt: isoInstant,
   collector: ordinaryText,
   immutableLocator: ordinaryText.optional(),
-  contentDigest: ordinaryText.optional(),
-  retention: ordinaryText,
+  contentDigest: contentDigestSchema.optional(),
+  retention: evidenceRetention,
 };
 
 function validateEvidenceLocation(
@@ -469,8 +483,8 @@ export const activeLessonReviewCommandSchema = z.object({
 
 /** Runtime schema for replacing retained evidence with its durable deletion tombstone. */
 export const evidenceRetentionCommandSchema = z.object({
-  actor,
+  actor: actor.extend({ authority: z.literal("evidence-retention") }),
   occurredAt: isoInstant,
-  contentDigest: ordinaryText,
+  contentDigest: contentDigestSchema,
   reason: sanitizedText,
 }).strict();

@@ -15,7 +15,6 @@ import {
   approvalCommandSchema,
   captureCandidateCommandSchema,
   enforcementLinkTransitionCommandSchema,
-  evidenceRetentionCommandSchema,
   materialRevisionCommandSchema,
   rejectionCommandSchema,
   reviewAttemptContextSchema,
@@ -23,13 +22,34 @@ import {
   terminalDispositionCommandSchema,
   SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS,
 } from "./operational-lessons-schema.ts";
+import { CandidateTransitionError, CandidateValidationError } from "./operational-lesson-errors.ts";
+import { deleteEvidenceForRetention } from "./operational-lesson-evidence.ts";
 import type {
   ConflictRecord,
   ConflictSuspensionLifecycleEvent,
   LessonRevisionReference,
 } from "./operational-lesson-conflicts.ts";
+import type {
+  ApprovalEvidenceReference,
+  EvidenceReference,
+  EvidenceRetentionLifecycleEvent,
+  SourceEvidenceReferenceInput,
+} from "./operational-lesson-evidence.ts";
 
 export { SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS };
+export { CandidateTransitionError, CandidateValidationError };
+export { deleteEvidenceForRetention };
+export type {
+  ApprovalEvidenceReference,
+  EvidenceKind,
+  EvidenceReference,
+  EvidenceReferenceInput,
+  EvidenceRetentionLifecycleEvent,
+  EvidenceRetentionSink,
+  EvidenceTombstone,
+  SourceEvidenceReferenceInput,
+} from "./operational-lesson-evidence.ts";
+/** Supported version of the storage-neutral Operational Lesson contract. */
 export type OperationalLessonSchemaVersion = typeof SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS[number];
 
 /** A fact category permitted at the sanitized capture boundary. */
@@ -64,31 +84,6 @@ export interface SanitizationMetadata {
   allowlistedFactClasses: FactClass[];
   prohibitedContentExcluded: true;
 }
-
-export type EvidenceKind = "source" | "recurrence" | "regression";
-
-/** A protected pointer to evidence, excluding the unsafe evidence itself. */
-export interface EvidenceReferenceInput {
-  evidenceId: string;
-  kind: EvidenceKind;
-  sanitizedSummary: string;
-  classification: string;
-  accessBoundary: string;
-  observedAt: string;
-  collector: string;
-  immutableLocator?: string | undefined;
-  contentDigest?: string | undefined;
-  retention: string;
-}
-
-export type SourceEvidenceReferenceInput = EvidenceReferenceInput & { kind: "source" };
-
-/** A protected evidence pointer bound immutably to one candidate revision. */
-export interface EvidenceReference extends EvidenceReferenceInput {
-  supportedRevision: number;
-}
-
-export type ApprovalEvidenceReference = EvidenceReference & { kind: "recurrence" | "regression" };
 
 /** Evidential confidence, kept separate from human approval. */
 export interface Confidence {
@@ -371,39 +366,6 @@ export interface CaptureLifecycleEvent {
   occurredAt: string;
   reason: "sanitized candidate captured";
   evidenceReferences: readonly string[];
-  outcome: "completed";
-}
-
-/** Durable explanation retained after the referenced evidence is deleted by policy. */
-export interface EvidenceTombstone {
-  evidenceId: string;
-  kind: EvidenceKind;
-  supportedRevision: number;
-  sanitizedSummary: string;
-  classification: string;
-  accessBoundary: string;
-  observedAt: string;
-  collector: string;
-  contentDigest: string;
-  retention: string;
-  deletedAt: string;
-  deletedBy: string;
-  deletionAuthority: string;
-  deletionActorKind: Actor["kind"];
-  deletionReason: string;
-}
-
-/** Audit event for retention-driven deletion of one exact Evidence Reference. */
-export interface EvidenceRetentionLifecycleEvent {
-  eventId: string;
-  evidenceId: string;
-  supportedRevision: number;
-  actor: string;
-  actorAuthority: string;
-  actorKind: Actor["kind"];
-  occurredAt: string;
-  reason: "evidence deleted under retention policy";
-  contentDigest: string;
   outcome: "completed";
 }
 
@@ -794,7 +756,8 @@ export type LifecycleEvent =
   | OverdueReviewLifecycleEvent
   | ActiveLessonReviewLifecycleEvent
   | ExpiryLifecycleEvent
-  | ConflictSuspensionLifecycleEvent;
+  | ConflictSuspensionLifecycleEvent
+  | EvidenceRetentionLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records
@@ -802,15 +765,6 @@ export type LifecycleEvent =
  */
 export interface CaptureSink {
   appendCapture(revision: CapturedCandidateLesson, event: CaptureLifecycleEvent): void;
-}
-
-/** Atomic boundary replacing retained evidence with its tombstone and audit event. */
-export interface EvidenceRetentionSink {
-  replaceEvidenceWithTombstone(
-    reference: Readonly<EvidenceReference>,
-    tombstone: Readonly<EvidenceTombstone>,
-    event: Readonly<EvidenceRetentionLifecycleEvent>,
-  ): void;
 }
 
 export interface ReviewSink {
@@ -1022,16 +976,6 @@ export interface RollbackRetirementCommand {
   impossibilityEvidence: RollbackImpossibilityEvidence;
 }
 
-/** A validation failure raised before the durable capture boundary is called. */
-export class CandidateValidationError extends Error {
-  override readonly name = "CandidateValidationError";
-}
-
-/** A valid lifecycle command that is blocked by a governance rule. */
-export class CandidateTransitionError extends Error {
-  override readonly name = "CandidateTransitionError";
-}
-
 /**
  * Captures immutable revision 1 from allowlisted, sanitized incident facts.
  * Validation completes before the sink receives the revision and event pair.
@@ -1052,57 +996,6 @@ export function captureCandidate(input: unknown, sink: CaptureSink): CapturedCan
 
   sink.appendCapture(candidate, event);
   return candidate;
-}
-
-/** Deletes retained evidence without leaving an unexplained gap in immutable lineage. */
-export function deleteEvidenceForRetention(
-  reference: Readonly<EvidenceReference>,
-  input: unknown,
-  sink: EvidenceRetentionSink,
-): EvidenceTombstone {
-  const parsed = evidenceRetentionCommandSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
-  }
-  const command = parsed.data;
-  if (Date.parse(command.occurredAt) < Date.parse(reference.observedAt)) {
-    throw new CandidateTransitionError("retention deletion cannot predate evidence observation");
-  }
-  if (reference.contentDigest && reference.contentDigest !== command.contentDigest) {
-    throw new CandidateTransitionError("retention deletion must preserve the immutable evidence digest");
-  }
-
-  const tombstone = deepFreeze({
-    evidenceId: reference.evidenceId,
-    kind: reference.kind,
-    supportedRevision: reference.supportedRevision,
-    sanitizedSummary: reference.sanitizedSummary,
-    classification: reference.classification,
-    accessBoundary: reference.accessBoundary,
-    observedAt: reference.observedAt,
-    collector: reference.collector,
-    contentDigest: command.contentDigest,
-    retention: reference.retention,
-    deletedAt: command.occurredAt,
-    deletedBy: command.actor.identity,
-    deletionAuthority: command.actor.authority,
-    deletionActorKind: command.actor.kind,
-    deletionReason: command.reason,
-  });
-  const event = deepFreeze({
-    eventId: `${reference.evidenceId}:${reference.supportedRevision}:retention-deleted:${command.occurredAt}`,
-    evidenceId: reference.evidenceId,
-    supportedRevision: reference.supportedRevision,
-    actor: command.actor.identity,
-    actorAuthority: command.actor.authority,
-    actorKind: command.actor.kind,
-    occurredAt: command.occurredAt,
-    reason: "evidence deleted under retention policy" as const,
-    contentDigest: command.contentDigest,
-    outcome: "completed" as const,
-  });
-  sink.replaceEvidenceWithTombstone(reference, tombstone, event);
-  return tombstone;
 }
 
 /** Assigns a captured revision to named human reviewers and records the transition atomically. */
