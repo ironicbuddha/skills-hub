@@ -44,8 +44,7 @@ export const contentDigestSchema = z.string().regex(
 export type ContentDigest = z.infer<typeof contentDigestSchema>;
 
 /** Duration or absolute expiry governing how long protected evidence is retained. */
-export type EvidenceRetention = `${number}${"d" | "h" | "m"}`
-  | `${number}-${number}-${number}T${string}`;
+export type EvidenceRetention = `${number}${"d" | "h" | "m"}` | `${number}-${number}-${number}T${string}`;
 const evidenceRetention = z.union([
   z.string().regex(/^[1-9]\d*[dhm]$/u),
   isoInstant,

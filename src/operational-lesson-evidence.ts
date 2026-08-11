@@ -53,35 +53,29 @@ export interface EvidenceTombstone {
   deletionReason: string;
 }
 
-/** Audit event for retention-driven deletion of one exact Evidence Reference. */
-export interface EvidenceRetentionLifecycleEvent {
+interface EvidenceRetentionEventBase {
   eventId: string;
   evidenceId: string;
   fromState: "available";
-  toState: "retention-deleted";
   revision: number;
   supportedRevision: number;
   actor: string;
   actorAuthority: string;
   actorKind: Actor["kind"];
   occurredAt: string;
+}
+
+/** Audit event for retention-driven deletion of one exact Evidence Reference. */
+export interface EvidenceRetentionLifecycleEvent extends EvidenceRetentionEventBase {
+  toState: "retention-deleted";
   reason: "evidence deleted under retention policy";
   contentDigest: ContentDigest;
   outcome: "completed";
 }
 
 /** Audit event for a governance-relevant evidence deletion attempt that was blocked. */
-export interface BlockedEvidenceRetentionLifecycleEvent {
-  eventId: string;
-  evidenceId: string;
-  fromState: "available";
+export interface BlockedEvidenceRetentionLifecycleEvent extends EvidenceRetentionEventBase {
   toState: "available";
-  revision: number;
-  supportedRevision: number;
-  actor: string;
-  actorAuthority: string;
-  actorKind: Actor["kind"];
-  occurredAt: string;
   reason: "evidence retention contract was not satisfied"
     | "evidence retention policy has not elapsed"
     | "evidence digest does not match immutable lineage";
@@ -133,16 +127,8 @@ function blockEvidenceRetention(
   reason: BlockedEvidenceRetentionLifecycleEvent["reason"],
 ): never {
   const event = Object.freeze({
-    eventId: `${reference.evidenceId}:${reference.supportedRevision}:retention-deletion-blocked:${command.occurredAt}`,
-    evidenceId: reference.evidenceId,
-    fromState: "available" as const,
+    ...retentionEventBase(reference, command, "retention-deletion-blocked"),
     toState: "available" as const,
-    revision: reference.supportedRevision,
-    supportedRevision: reference.supportedRevision,
-    actor: command.actor.identity,
-    actorAuthority: command.actor.authority,
-    actorKind: command.actor.kind,
-    occurredAt: command.occurredAt,
     reason,
     outcome: "blocked" as const,
   });
@@ -186,18 +172,28 @@ function freezeRetentionEvent(
   command: ReturnType<typeof evidenceRetentionCommandSchema.parse>,
 ): Readonly<EvidenceRetentionLifecycleEvent> {
   return Object.freeze({
-    eventId: `${reference.evidenceId}:${reference.supportedRevision}:retention-deleted:${command.occurredAt}`,
+    ...retentionEventBase(reference, command, "retention-deleted"),
+    toState: "retention-deleted",
+    reason: "evidence deleted under retention policy",
+    contentDigest: command.contentDigest,
+    outcome: "completed",
+  });
+}
+
+function retentionEventBase(
+  reference: Readonly<EvidenceReference>,
+  command: { actor: Actor; occurredAt: string },
+  eventKind: "retention-deleted" | "retention-deletion-blocked",
+): EvidenceRetentionEventBase {
+  return {
+    eventId: `${reference.evidenceId}:${reference.supportedRevision}:${eventKind}:${command.occurredAt}`,
     evidenceId: reference.evidenceId,
     fromState: "available",
-    toState: "retention-deleted",
     revision: reference.supportedRevision,
     supportedRevision: reference.supportedRevision,
     actor: command.actor.identity,
     actorAuthority: command.actor.authority,
     actorKind: command.actor.kind,
     occurredAt: command.occurredAt,
-    reason: "evidence deleted under retention policy",
-    contentDigest: command.contentDigest,
-    outcome: "completed",
-  });
+  };
 }
