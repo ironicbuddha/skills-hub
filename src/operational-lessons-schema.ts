@@ -43,10 +43,14 @@ export const contentDigestSchema = z.string().regex(
 /** Canonical, algorithm-qualified digest of protected evidence content. */
 export type ContentDigest = z.infer<typeof contentDigestSchema>;
 
+/** Duration or absolute expiry governing how long protected evidence is retained. */
+export type EvidenceRetention = `${number}${"d" | "h" | "m"}`
+  | `${number}-${number}-${number}T${string}`;
 const evidenceRetention = z.union([
   z.string().regex(/^[1-9]\d*[dhm]$/u),
   isoInstant,
-], { error: "evidence retention must be a positive duration or ISO expiry" });
+], { error: "evidence retention must be a positive duration or ISO expiry" })
+  .transform((value): EvidenceRetention => value as EvidenceRetention);
 
 const factClass = z.enum(["operation", "observed-outcome", "trust-boundary", "impact"]);
 /** Shared lifecycle actor schema. */
@@ -488,3 +492,9 @@ export const evidenceRetentionCommandSchema = z.object({
   contentDigest: contentDigestSchema,
   reason: sanitizedText,
 }).strict();
+
+/** Actor metadata retained when an evidence-retention attempt is blocked. */
+export const evidenceRetentionAttemptContextSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+}).passthrough();

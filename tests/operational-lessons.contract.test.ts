@@ -109,6 +109,22 @@ function expectedEvidenceRetentionEvent() {
   };
 }
 
+function assertBlockedRetentionEvents(events: LifecycleEvent[]) {
+  assert.deepEqual(events.map((event) => ({
+    actor: event.actor, actorAuthority: event.actorAuthority, actorKind: event.actorKind,
+    reason: event.reason, outcome: event.outcome,
+  })), [
+    {
+      actor: "retention-service", actorAuthority: "evidence-retention", actorKind: "service",
+      reason: "evidence retention policy has not elapsed", outcome: "blocked",
+    },
+    {
+      actor: "capture-agent", actorAuthority: "incident-capture", actorKind: "agent",
+      reason: "evidence retention contract was not satisfied", outcome: "blocked",
+    },
+  ]);
+}
+
 function captureSink(
   revisions: CandidateLesson[] = [],
   events: LifecycleEvent[] = [],
@@ -606,7 +622,7 @@ function assertVersionedRetentionAndRollback(schemaVersion: CaptureCandidateComm
   const tombstone = deleteEvidenceForRetention(
     reference,
     retentionDeletionCommand("2027-08-09T10:00:00.000Z"),
-    { replaceEvidenceWithTombstone() {} },
+    { replaceEvidenceWithTombstone() {}, appendBlockedEvidenceRetention() {} },
   );
   const { safeSource, harmfulActive, disabledControl } = harmfulRollbackFixture(schemaVersion);
   const initiated = initiateLessonRollback(harmfulActive, safeSource, rollbackCommand(), {
@@ -709,22 +725,25 @@ test("retention deletion atomically replaces evidence with an immutable tombston
   let retentionReplacementWrite:
     | Parameters<EvidenceRetentionSink["replaceEvidenceWithTombstone"]>
     | undefined;
+  const blockedEvents: LifecycleEvent[] = [];
+  const retentionSink: EvidenceRetentionSink = {
+    replaceEvidenceWithTombstone(...records) { retentionReplacementWrite = records; },
+    appendBlockedEvidenceRetention(event) { blockedEvents.push(event); },
+  };
 
   assert.throws(() => deleteEvidenceForRetention(
     reference,
     retentionDeletionCommand("2026-08-10T10:00:00.000Z"),
-    { replaceEvidenceWithTombstone() {} },
-  ), /before its retention period elapses/u);
+    retentionSink,
+  ), /retention policy has not elapsed/u);
   assert.throws(() => deleteEvidenceForRetention(reference, {
     ...retentionDeletionCommand("2027-08-09T10:00:00.000Z"),
     actor: { identity: "capture-agent", authority: "incident-capture", kind: "agent" },
-  }, { replaceEvidenceWithTombstone() {} }), CandidateValidationError);
+  }, retentionSink), CandidateTransitionError);
 
   const tombstone = deleteEvidenceForRetention(reference, retentionDeletionCommand(
     "2027-08-09T10:00:00.000Z",
-  ), {
-    replaceEvidenceWithTombstone(...records) { retentionReplacementWrite = records; },
-  });
+  ), retentionSink);
 
   assert.deepEqual(tombstone, expectedEvidenceTombstone());
   assert.strictEqual(retentionReplacementWrite?.[0], reference);
@@ -734,6 +753,7 @@ test("retention deletion atomically replaces evidence with an immutable tombston
   assert.equal(Object.isFrozen(tombstone), true);
   assert.equal(Object.isFrozen(auditEvent), true);
   assert.equal(reference.immutableLocator, "sha256:8d12");
+  assertBlockedRetentionEvents(blockedEvents);
 });
 
 test("prohibited material is rejected before durable capture", () => {

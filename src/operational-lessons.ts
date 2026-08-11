@@ -31,16 +31,19 @@ import type {
 } from "./operational-lesson-conflicts.ts";
 import type {
   ApprovalEvidenceReference,
+  BlockedEvidenceRetentionLifecycleEvent,
   EvidenceReference,
   EvidenceRetentionLifecycleEvent,
   SourceEvidenceReferenceInput,
 } from "./operational-lesson-evidence.ts";
 
 export { SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS };
+export type { ContentDigest, EvidenceRetention } from "./operational-lessons-schema.ts";
 export { CandidateTransitionError, CandidateValidationError };
 export { deleteEvidenceForRetention };
 export type {
   ApprovalEvidenceReference,
+  BlockedEvidenceRetentionLifecycleEvent,
   EvidenceKind,
   EvidenceReference,
   EvidenceReferenceInput,
@@ -757,7 +760,8 @@ export type LifecycleEvent =
   | ActiveLessonReviewLifecycleEvent
   | ExpiryLifecycleEvent
   | ConflictSuspensionLifecycleEvent
-  | EvidenceRetentionLifecycleEvent;
+  | EvidenceRetentionLifecycleEvent
+  | BlockedEvidenceRetentionLifecycleEvent;
 
 /**
  * Durable boundary for capture. Implementations atomically append both records

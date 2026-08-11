@@ -1,6 +1,9 @@
-import { evidenceRetentionCommandSchema } from "./operational-lessons-schema.ts";
+import {
+  evidenceRetentionAttemptContextSchema,
+  evidenceRetentionCommandSchema,
+} from "./operational-lessons-schema.ts";
 import { CandidateTransitionError, CandidateValidationError } from "./operational-lesson-errors.ts";
-import type { ContentDigest } from "./operational-lessons-schema.ts";
+import type { ContentDigest, EvidenceRetention } from "./operational-lessons-schema.ts";
 import type { Actor } from "./operational-lessons.ts";
 
 /** Supported roles an Evidence Reference can play in lesson governance. */
@@ -17,7 +20,7 @@ export interface EvidenceReferenceInput {
   collector: string;
   immutableLocator?: string | undefined;
   contentDigest?: ContentDigest | undefined;
-  retention: string;
+  retention: EvidenceRetention;
 }
 
 /** Source evidence accepted at the sanitized capture boundary. */
@@ -42,7 +45,7 @@ export interface EvidenceTombstone {
   observedAt: string;
   collector: string;
   contentDigest: ContentDigest;
-  retention: string;
+  retention: EvidenceRetention;
   deletedAt: string;
   deletedBy: string;
   deletionAuthority: string;
@@ -67,6 +70,24 @@ export interface EvidenceRetentionLifecycleEvent {
   outcome: "completed";
 }
 
+/** Audit event for a governance-relevant evidence deletion attempt that was blocked. */
+export interface BlockedEvidenceRetentionLifecycleEvent {
+  eventId: string;
+  evidenceId: string;
+  fromState: "available";
+  toState: "available";
+  revision: number;
+  supportedRevision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "evidence retention contract was not satisfied"
+    | "evidence retention policy has not elapsed"
+    | "evidence digest does not match immutable lineage";
+  outcome: "blocked";
+}
+
 /** Atomic boundary replacing retained evidence with its tombstone and audit event. */
 export interface EvidenceRetentionSink {
   replaceEvidenceWithTombstone(
@@ -74,6 +95,7 @@ export interface EvidenceRetentionSink {
     tombstone: Readonly<EvidenceTombstone>,
     event: Readonly<EvidenceRetentionLifecycleEvent>,
   ): void;
+  appendBlockedEvidenceRetention(event: Readonly<BlockedEvidenceRetentionLifecycleEvent>): void;
 }
 
 /** Deletes expired evidence without leaving an unexplained gap in immutable lineage. */
@@ -83,21 +105,49 @@ export function deleteEvidenceForRetention(
   sink: EvidenceRetentionSink,
 ): EvidenceTombstone {
   const parsed = evidenceRetentionCommandSchema.safeParse(input);
+  const attempt = evidenceRetentionAttemptContextSchema.safeParse(input);
   if (!parsed.success) {
+    if (attempt.success) {
+      blockEvidenceRetention(reference, attempt.data, sink, "evidence retention contract was not satisfied");
+    }
     throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
   }
   const command = parsed.data;
   if (Date.parse(command.occurredAt) < retentionDeadline(reference)) {
-    throw new CandidateTransitionError("evidence cannot be deleted before its retention period elapses");
+    blockEvidenceRetention(reference, command, sink, "evidence retention policy has not elapsed");
   }
   if (reference.contentDigest && reference.contentDigest !== command.contentDigest) {
-    throw new CandidateTransitionError("retention deletion must preserve the immutable evidence digest");
+    blockEvidenceRetention(reference, command, sink, "evidence digest does not match immutable lineage");
   }
 
   const tombstone = freezeEvidenceTombstone(reference, command);
   const event = freezeRetentionEvent(reference, command);
   sink.replaceEvidenceWithTombstone(reference, tombstone, event);
   return tombstone;
+}
+
+function blockEvidenceRetention(
+  reference: Readonly<EvidenceReference>,
+  command: { actor: Actor; occurredAt: string },
+  sink: EvidenceRetentionSink,
+  reason: BlockedEvidenceRetentionLifecycleEvent["reason"],
+): never {
+  const event = Object.freeze({
+    eventId: `${reference.evidenceId}:${reference.supportedRevision}:retention-deletion-blocked:${command.occurredAt}`,
+    evidenceId: reference.evidenceId,
+    fromState: "available" as const,
+    toState: "available" as const,
+    revision: reference.supportedRevision,
+    supportedRevision: reference.supportedRevision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: command.actor.kind,
+    occurredAt: command.occurredAt,
+    reason,
+    outcome: "blocked" as const,
+  });
+  sink.appendBlockedEvidenceRetention(event);
+  throw new CandidateTransitionError(reason);
 }
 
 function retentionDeadline(reference: Readonly<EvidenceReference>): number {
