@@ -15,17 +15,22 @@ import {
   approvalCommandSchema,
   captureCandidateCommandSchema,
   enforcementLinkTransitionCommandSchema,
+  evidenceRetentionCommandSchema,
   materialRevisionCommandSchema,
   rejectionCommandSchema,
   reviewAttemptContextSchema,
   reviewSubmissionCommandSchema,
   terminalDispositionCommandSchema,
+  SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS,
 } from "./operational-lessons-schema.ts";
 import type {
   ConflictRecord,
   ConflictSuspensionLifecycleEvent,
   LessonRevisionReference,
 } from "./operational-lesson-conflicts.ts";
+
+export { SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS };
+export type OperationalLessonSchemaVersion = typeof SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS[number];
 
 /** A fact category permitted at the sanitized capture boundary. */
 export type FactClass = "operation" | "observed-outcome" | "trust-boundary" | "impact";
@@ -34,7 +39,7 @@ export type FactClass = "operation" | "observed-outcome" | "trust-boundary" | "i
 export interface Actor {
   identity: string;
   authority: string;
-  kind: "human" | "service";
+  kind: "human" | "agent" | "service";
 }
 
 /** A stable reference to an operation or incident that produced the candidate. */
@@ -60,23 +65,30 @@ export interface SanitizationMetadata {
   prohibitedContentExcluded: true;
 }
 
-/** A protected pointer to source evidence, excluding the unsafe evidence itself. */
+export type EvidenceKind = "source" | "recurrence" | "regression";
+
+/** A protected pointer to evidence, excluding the unsafe evidence itself. */
 export interface EvidenceReferenceInput {
   evidenceId: string;
-  kind: "source";
+  kind: EvidenceKind;
   sanitizedSummary: string;
   classification: string;
   accessBoundary: string;
   observedAt: string;
   collector: string;
-  immutableLocator: string;
+  immutableLocator?: string | undefined;
+  contentDigest?: string | undefined;
   retention: string;
 }
+
+export type SourceEvidenceReferenceInput = EvidenceReferenceInput & { kind: "source" };
 
 /** A protected evidence pointer bound immutably to one candidate revision. */
 export interface EvidenceReference extends EvidenceReferenceInput {
   supportedRevision: number;
 }
+
+export type ApprovalEvidenceReference = EvidenceReference & { kind: "recurrence" | "regression" };
 
 /** Evidential confidence, kept separate from human approval. */
 export interface Confidence {
@@ -87,7 +99,7 @@ export interface Confidence {
 /** The complete storage-neutral command accepted by the capture boundary. */
 export interface CaptureCandidateCommand {
   lessonId: string;
-  schemaVersion: string;
+  schemaVersion: OperationalLessonSchemaVersion;
   title: string;
   actor: Actor;
   occurredAt: string;
@@ -96,7 +108,7 @@ export interface CaptureCandidateCommand {
   failureMode: string;
   sanitization: SanitizationMetadata;
   evidenceSummary: string;
-  evidenceReferences: EvidenceReferenceInput[];
+  evidenceReferences: SourceEvidenceReferenceInput[];
   confidence: Confidence;
   recurrenceSignature: string;
   invariant: string;
@@ -107,7 +119,7 @@ export interface CaptureCandidateCommand {
 /** Immutable content shared by sanitized Candidate Lesson revisions. */
 interface CandidateLessonFields {
   lessonId: string;
-  schemaVersion: string;
+  schemaVersion: OperationalLessonSchemaVersion;
   revision: number;
   revisionId: string;
   title: string;
@@ -206,18 +218,7 @@ export interface ApprovalCommand {
   waivers: string[];
   recurrenceEvidence?: string[] | undefined;
   severeFirstOccurrence?: { justification: string; deterministicRegressionEvidence: string[] } | undefined;
-  evidenceReferences: {
-    evidenceId: string;
-    kind: "recurrence" | "regression";
-    supportedRevision: number;
-    sanitizedSummary: string;
-    classification: string;
-    accessBoundary: string;
-    observedAt: string;
-    collector: string;
-    immutableLocator: string;
-    retention: string;
-  }[];
+  evidenceReferences: ApprovalEvidenceReference[];
   regressionClaims: RegressionClaim[];
   applicability: string;
   exclusions: string[];
@@ -370,6 +371,40 @@ export interface CaptureLifecycleEvent {
   occurredAt: string;
   reason: "sanitized candidate captured";
   evidenceReferences: readonly string[];
+  outcome: "completed";
+}
+
+/** Durable explanation retained after the referenced evidence is deleted by policy. */
+export interface EvidenceTombstone {
+  evidenceId: string;
+  kind: EvidenceKind;
+  supportedRevision: number;
+  sanitizedSummary: string;
+  classification: string;
+  accessBoundary: string;
+  observedAt: string;
+  collector: string;
+  contentDigest: string;
+  retention: string;
+  deletedAt: string;
+  deletedBy: string;
+  deletionAuthority: string;
+  deletionActorKind: Actor["kind"];
+  deletionReason: string;
+}
+
+/** Audit event for retention-driven deletion of one exact Evidence Reference. */
+export interface EvidenceRetentionLifecycleEvent {
+  eventId: string;
+  evidenceId: string;
+  supportedRevision: number;
+  actor: string;
+  actorAuthority: string;
+  actorKind: Actor["kind"];
+  occurredAt: string;
+  reason: "evidence deleted under retention policy";
+  contentDigest: string;
+  outcome: "completed";
 }
 
 
@@ -769,6 +804,15 @@ export interface CaptureSink {
   appendCapture(revision: CapturedCandidateLesson, event: CaptureLifecycleEvent): void;
 }
 
+/** Atomic boundary replacing retained evidence with its tombstone and audit event. */
+export interface EvidenceRetentionSink {
+  replaceEvidenceWithTombstone(
+    reference: Readonly<EvidenceReference>,
+    tombstone: Readonly<EvidenceTombstone>,
+    event: Readonly<EvidenceRetentionLifecycleEvent>,
+  ): void;
+}
+
 export interface ReviewSink {
   appendReviewTransition(revision: UnderReviewCandidateLesson, event: ReviewLifecycleEvent): void;
   appendBlockedReviewAttempt(event: BlockedReviewLifecycleEvent): void;
@@ -1010,6 +1054,57 @@ export function captureCandidate(input: unknown, sink: CaptureSink): CapturedCan
   return candidate;
 }
 
+/** Deletes retained evidence without leaving an unexplained gap in immutable lineage. */
+export function deleteEvidenceForRetention(
+  reference: Readonly<EvidenceReference>,
+  input: unknown,
+  sink: EvidenceRetentionSink,
+): EvidenceTombstone {
+  const parsed = evidenceRetentionCommandSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new CandidateValidationError(parsed.error.issues.map(({ message }) => message).join("; "));
+  }
+  const command = parsed.data;
+  if (Date.parse(command.occurredAt) < Date.parse(reference.observedAt)) {
+    throw new CandidateTransitionError("retention deletion cannot predate evidence observation");
+  }
+  if (reference.contentDigest && reference.contentDigest !== command.contentDigest) {
+    throw new CandidateTransitionError("retention deletion must preserve the immutable evidence digest");
+  }
+
+  const tombstone = deepFreeze({
+    evidenceId: reference.evidenceId,
+    kind: reference.kind,
+    supportedRevision: reference.supportedRevision,
+    sanitizedSummary: reference.sanitizedSummary,
+    classification: reference.classification,
+    accessBoundary: reference.accessBoundary,
+    observedAt: reference.observedAt,
+    collector: reference.collector,
+    contentDigest: command.contentDigest,
+    retention: reference.retention,
+    deletedAt: command.occurredAt,
+    deletedBy: command.actor.identity,
+    deletionAuthority: command.actor.authority,
+    deletionActorKind: command.actor.kind,
+    deletionReason: command.reason,
+  });
+  const event = deepFreeze({
+    eventId: `${reference.evidenceId}:${reference.supportedRevision}:retention-deleted:${command.occurredAt}`,
+    evidenceId: reference.evidenceId,
+    supportedRevision: reference.supportedRevision,
+    actor: command.actor.identity,
+    actorAuthority: command.actor.authority,
+    actorKind: command.actor.kind,
+    occurredAt: command.occurredAt,
+    reason: "evidence deleted under retention policy" as const,
+    contentDigest: command.contentDigest,
+    outcome: "completed" as const,
+  });
+  sink.replaceEvidenceWithTombstone(reference, tombstone, event);
+  return tombstone;
+}
+
 /** Assigns a captured revision to named human reviewers and records the transition atomically. */
 export function submitCandidateForReview(
   candidate: CapturedCandidateLesson,
@@ -1096,10 +1191,6 @@ export function reviseCandidate(
   }
   const { reviewAssignment: _priorReview, ...priorRevision } = candidate;
   const revision = candidate.revision + 1;
-  const evidenceReferences = candidate.evidenceReferences.map((reference) => ({
-    ...reference,
-    supportedRevision: revision,
-  }));
   const revised = deepFreeze({
     ...priorRevision,
     ...changedFields,
@@ -1108,7 +1199,7 @@ export function reviseCandidate(
     state: "captured" as const,
     revisionCreatedAt: command.occurredAt,
     revisionCreatedBy: command.actor.identity,
-    evidenceReferences,
+    evidenceReferences: candidate.evidenceReferences,
     predecessorRevisionId: candidate.revisionId,
     changeSummary: command.changeSummary,
   });
@@ -1918,9 +2009,7 @@ function createRollbackRevision(
     state: "under_review" as const,
     revisionCreatedAt: command.occurredAt,
     revisionCreatedBy: command.actor.identity,
-    evidenceReferences: safeSource.evidenceReferences.map((reference) => ({
-      ...reference, supportedRevision: revision,
-    })),
+    evidenceReferences: safeSource.evidenceReferences,
     predecessorRevisionId: defective.revisionId,
     changeSummary: command.reason,
     rollbackDefectiveRevisionId: defective.revisionId,
@@ -1973,7 +2062,7 @@ function createActiveSuccessor(
     state: "under_review" as const,
     revisionCreatedAt: command.occurredAt,
     revisionCreatedBy: command.actor.identity,
-    evidenceReferences: predecessor.evidenceReferences.map((reference) => ({ ...reference, supportedRevision: revision })),
+    evidenceReferences: predecessor.evidenceReferences,
     predecessorRevisionId: predecessor.revisionId,
     changeSummary: command.changeSummary,
     reviewAssignment: command.assignment,
@@ -2094,6 +2183,7 @@ function createCaptureEvent(
     occurredAt: command.occurredAt,
     reason: "sanitized candidate captured",
     evidenceReferences: evidenceReferences.map(({ evidenceId }) => evidenceId),
+    outcome: "completed",
   });
 }
 

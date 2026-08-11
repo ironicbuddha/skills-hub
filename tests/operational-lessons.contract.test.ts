@@ -16,6 +16,7 @@ import {
   captureCandidate,
   CandidateTransitionError,
   CandidateValidationError,
+  deleteEvidenceForRetention,
   publishMarkdown,
   evaluateActiveLessonDeadlines,
   initiateLessonRollback,
@@ -29,6 +30,7 @@ import {
   transitionEnforcementLink,
   selectConsumerGuidance,
   supersedeActiveLessonAcrossLessons,
+  SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS,
   type CaptureCandidateCommand,
   type CaptureSink,
   type ApprovalCommand,
@@ -41,6 +43,7 @@ import {
   type LifecycleEvent,
   type LessonRollbackCommand,
   type EnforcementLinkLifecycleEvent,
+  type EvidenceRetentionSink,
   type OperationalLesson,
   type ReviewAssignment,
   type ReviewSink,
@@ -219,8 +222,8 @@ const approvalCommand = (): ApprovalCommand => ({
   },
 });
 
-function reviewedCandidate() {
-  const captured = captureCandidate(command(), captureSink());
+function reviewedCandidate(schemaVersion: CaptureCandidateCommand["schemaVersion"] = "1.0") {
+  const captured = captureCandidate({ ...command(), schemaVersion }, captureSink());
   return submitCandidateForReview(captured, {
     actor: { identity: "platform-safety-owner", authority: "lesson-owner", kind: "human" },
     occurredAt: "2026-08-09T10:05:00.000Z",
@@ -228,8 +231,11 @@ function reviewedCandidate() {
   }, { appendReviewTransition() {}, appendBlockedReviewAttempt() {} });
 }
 
-function approvedCandidate(changes: Partial<ApprovalCommand> = {}) {
-  return approveCandidate(reviewedCandidate(), { ...approvalCommand(), ...changes }, {
+function approvedCandidate(
+  changes: Partial<ApprovalCommand> = {},
+  schemaVersion: CaptureCandidateCommand["schemaVersion"] = "1.0",
+) {
+  return approveCandidate(reviewedCandidate(schemaVersion), { ...approvalCommand(), ...changes }, {
     appendApproval() {},
     appendBlockedApproval() {},
   });
@@ -243,7 +249,7 @@ const activationCommand = (): ActivationCommand => ({
   enforcementWaivers: [],
 });
 
-function activeCandidate(): ActiveLesson {
+function activeCandidate(schemaVersion: CaptureCandidateCommand["schemaVersion"] = "1.0"): ActiveLesson {
   const approved = approvedCandidate({
     evidenceReferences: [
       ...approvalCommand().evidenceReferences,
@@ -260,7 +266,7 @@ function activeCandidate(): ActiveLesson {
         retention: "365d",
       },
     ],
-  });
+  }, schemaVersion);
   return activateApprovedLesson(approved, activationCommand(), {
     activateAsSoleRevision() {},
     appendBlockedActivation() {},
@@ -492,10 +498,107 @@ test("capture creates immutable revision 1 and an append-only event", () => {
       occurredAt: "2026-08-09T10:00:00.000Z",
       reason: "sanitized candidate captured",
       evidenceReferences: ["evidence-42"],
+      outcome: "completed",
     },
   ]);
   assert.equal(Object.isFrozen(captured), true);
   assert.equal(Object.isFrozen(events[0]), true);
+});
+
+test("Evidence References support every kind with an immutable locator or digest", () => {
+  const { immutableLocator: _locator, ...sourceEvidence } = command().evidenceReferences[0]!;
+  const captured = captureCandidate({
+    ...command(),
+    evidenceReferences: [{ ...sourceEvidence, contentDigest: "sha256:source-evidence-42" }],
+  }, captureSink());
+  const approval = approvalCommand();
+  const { immutableLocator: _regressionLocator, ...regressionEvidence } = {
+    ...approval.evidenceReferences[0]!,
+    evidenceId: "regression-evidence-42",
+    kind: "regression" as const,
+  };
+  const approved = approveCandidate(reviewedCandidate(), {
+    ...approval,
+    evidenceReferences: [
+      approval.evidenceReferences[0],
+      { ...regressionEvidence, contentDigest: "sha256:regression-evidence-42" },
+    ],
+  }, { appendApproval() {}, appendBlockedApproval() {} });
+
+  assert.equal(captured.evidenceReferences[0]?.kind, "source");
+  assert.equal(captured.evidenceReferences[0]?.contentDigest, "sha256:source-evidence-42");
+  assert.deepEqual(approved.approval.evidenceReferences.map(({ kind }) => kind), ["recurrence", "regression"]);
+  assert.equal(approved.approval.evidenceReferences[1]?.contentDigest, "sha256:regression-evidence-42");
+
+  const { immutableLocator: _missingLocator, ...unlocatable } = command().evidenceReferences[0]!;
+  assert.throws(
+    () => captureCandidate({ ...command(), evidenceReferences: [unlocatable] }, captureSink()),
+    /immutable locator or digest/u,
+  );
+});
+
+test("material revisions preserve immutable Evidence Reference lineage", () => {
+  const underReview = reviewedCandidate();
+  const revised = reviseCandidate(underReview, {
+    actor: { identity: "human-reviewer", authority: "lesson-approver", kind: "human" },
+    occurredAt: "2026-08-09T10:15:00.000Z",
+    changeSummary: "Clarify the publication boundary.",
+    changes: { guidance: "Use a byte-preserving data boundary for Markdown publication." },
+  }, { appendRevision() {}, appendBlockedRevision() {} });
+
+  assert.strictEqual(revised.evidenceReferences[0], underReview.evidenceReferences[0]);
+  assert.equal(revised.evidenceReferences[0]?.supportedRevision, 1);
+});
+
+test("retention deletion atomically replaces evidence with an immutable tombstone and digest", () => {
+  const reference = captureCandidate(command(), captureSink()).evidenceReferences[0]!;
+  let write:
+    | Parameters<EvidenceRetentionSink["replaceEvidenceWithTombstone"]>
+    | undefined;
+
+  const tombstone = deleteEvidenceForRetention(reference, {
+    actor: { identity: "retention-service", authority: "evidence-retention", kind: "service" },
+    occurredAt: "2027-08-09T10:00:00.000Z",
+    contentDigest: "sha256:deleted-evidence-42",
+    reason: "The declared retention period elapsed.",
+  }, {
+    replaceEvidenceWithTombstone(...records) { write = records; },
+  });
+
+  assert.deepEqual(tombstone, {
+    evidenceId: "evidence-42",
+    kind: "source",
+    supportedRevision: 1,
+    sanitizedSummary: "Protected incident record for the failed publication.",
+    classification: "confidential",
+    accessBoundary: "incident-reviewers",
+    observedAt: "2026-08-09T09:55:00.000Z",
+    collector: "capture-agent",
+    contentDigest: "sha256:deleted-evidence-42",
+    retention: "365d",
+    deletedAt: "2027-08-09T10:00:00.000Z",
+    deletedBy: "retention-service",
+    deletionAuthority: "evidence-retention",
+    deletionActorKind: "service",
+    deletionReason: "The declared retention period elapsed.",
+  });
+  assert.strictEqual(write?.[0], reference);
+  assert.strictEqual(write?.[1], tombstone);
+  assert.deepEqual(write?.[2], {
+    eventId: "evidence-42:1:retention-deleted:2027-08-09T10:00:00.000Z",
+    evidenceId: "evidence-42",
+    supportedRevision: 1,
+    actor: "retention-service",
+    actorAuthority: "evidence-retention",
+    actorKind: "service",
+    occurredAt: "2027-08-09T10:00:00.000Z",
+    reason: "evidence deleted under retention policy",
+    contentDigest: "sha256:deleted-evidence-42",
+    outcome: "completed",
+  });
+  assert.equal(Object.isFrozen(tombstone), true);
+  assert.equal(Object.isFrozen(write?.[2]), true);
+  assert.equal(reference.immutableLocator, "sha256:8d12");
 });
 
 test("prohibited material is rejected before durable capture", () => {
@@ -573,6 +676,79 @@ test("provenance requires strict ISO date-times", () => {
   assert.throws(
     () => captureCandidate({ ...command(), occurredAt: "2026-08-09" }, captureSink()),
     CandidateValidationError,
+  );
+});
+
+test("supported schema versions preserve lifecycle, governance, and atomic replacement invariants", () => {
+  for (const schemaVersion of SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS) {
+    const active = activeCandidate(schemaVersion);
+    const conflict = {
+      conflictId: `conflict-${schemaVersion}`,
+      lessonRevisions: [
+        { lessonId: active.lessonId, revisionId: active.revisionId },
+        { lessonId: "lesson_other", revisionId: "lesson_other:1" },
+      ],
+      overlappingScope: "Repository Markdown publication.",
+      contradictoryObligations: ["Use the shell interpreter.", "Never use the shell interpreter."],
+      discoveredAt: "2026-08-09T10:20:00.000Z",
+      discoveredBy: "human-reviewer",
+      discoveryProvenance: "repository-guidance-review-17",
+      severity: "high" as const,
+      blocking: true,
+      credibleHarm: true,
+      status: "open" as const,
+      owner: "platform-safety",
+      resolutionRationale: null,
+      resolutionAuthority: null,
+      exceptionExpiresAt: null,
+      resultingLessonRevisions: [],
+    };
+    const conflictBlocked = approvedCandidate({
+      conflictReferences: [conflict.conflictId],
+      conflictRecords: [conflict],
+    }, schemaVersion);
+    const blockedEvents: LifecycleEvent[] = [];
+
+    assert.throws(() => activateApprovedLesson(conflictBlocked, activationCommand(), {
+      activateAsSoleRevision() { assert.fail("schema evolution cannot weaken Conflict gates"); },
+      appendBlockedActivation(event) { blockedEvents.push(event); },
+    }, conflictBlocked.approval.enforcementLinks), CandidateTransitionError);
+
+    const successor = approvedSuccessor(active);
+    let commits = 0;
+    const replacement = replaceActiveLesson(active, successor, {
+      ...activationCommand(),
+      occurredAt: "2026-08-09T12:00:00.000Z",
+      revisionId: successor.revisionId,
+      regressionEvidence: ["regression-safe-publication-v2"],
+    }, {
+      replaceActiveRevision(predecessor, activated) {
+        commits++;
+        assert.equal(predecessor.state, "superseded");
+        assert.equal(activated.state, "active");
+      },
+      appendBlockedReplacement() {},
+    }, {
+      predecessor: active.approval.enforcementLinks,
+      successor: successor.approval.enforcementLinks,
+    });
+
+    assert.equal(active.schemaVersion, schemaVersion);
+    assert.equal(replacement.successor.schemaVersion, schemaVersion);
+    assert.equal(Object.isFrozen(active), true);
+    assert.equal(active.approval.approver, "human-reviewer");
+    assert.equal(active.approval.authority, "lesson-approver");
+    assert.equal(active.approval.enforcementLinks[0]?.deploymentState, "ready");
+    assert.equal(blockedEvents[0]?.actorKind, "service");
+    assert.equal(blockedEvents[0]?.actorAuthority, "lesson-activator");
+    assert.equal(commits, 1);
+    assert.equal(selectConsumerGuidance(replacement.predecessor), null);
+    assert.equal(selectConsumerGuidance(replacement.successor), successor.guidance);
+  }
+
+  assert.throws(
+    () => captureCandidate({ ...command(), schemaVersion: "2.0" }, captureSink()),
+    /unsupported Operational Lesson schema version/u,
   );
 });
 
@@ -908,6 +1084,23 @@ test("automation cannot reject by claiming an assigned human identity and author
     CandidateTransitionError,
   );
   assert.equal(blocked, 1);
+});
+
+test("an agent approval attempt is blocked with its identity and authority intact", () => {
+  const events: LifecycleEvent[] = [];
+
+  assert.throws(() => approveCandidate(reviewedCandidate(), {
+    ...approvalCommand(),
+    actor: { identity: "review-agent", authority: "lesson-approver", kind: "agent" },
+  }, {
+    appendApproval() { assert.fail("an agent cannot exercise human approval authority"); },
+    appendBlockedApproval(event) { events.push(event); },
+  }), CandidateTransitionError);
+
+  assert.equal(events[0]?.outcome, "blocked");
+  assert.equal(events[0]?.actor, "review-agent");
+  assert.equal(events[0]?.actorAuthority, "lesson-approver");
+  assert.equal(events[0]?.actorKind, "agent");
 });
 
 test("an authorized human approves one exact, complete revision without activating it", () => {

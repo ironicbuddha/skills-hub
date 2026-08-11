@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+/** Explicitly compatible revisions of the storage-neutral lifecycle contract. */
+export const SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS = ["1.0", "1.1"] as const;
+export const operationalLessonSchemaVersion = z.enum(
+  SUPPORTED_OPERATIONAL_LESSON_SCHEMA_VERSIONS,
+  { error: "unsupported Operational Lesson schema version" },
+);
+
 /** Shared ISO instant validator for lifecycle command schema modules. */
 export const isoInstant = z.iso.datetime({ offset: true });
 const prohibitedContent = [
@@ -30,7 +37,7 @@ export const sanitizedText = ordinaryText
 const factClass = z.enum(["operation", "observed-outcome", "trust-boundary", "impact"]);
 /** Shared lifecycle actor schema. */
 export const actor = z
-  .object({ identity: ordinaryText, authority: ordinaryText, kind: z.enum(["human", "service"]) })
+  .object({ identity: ordinaryText, authority: ordinaryText, kind: z.enum(["human", "agent", "service"]) })
   .strict();
 const sourceEvent = z
   .object({ sourceId: ordinaryText, sourceKind: ordinaryText, observedAt: isoInstant })
@@ -46,19 +53,44 @@ const sanitization = z
     prohibitedContentExcluded: z.literal(true),
   })
   .strict();
-const evidenceReference = z
+const evidenceReferenceFields = {
+  evidenceId: ordinaryText,
+  sanitizedSummary: sanitizedText,
+  classification: ordinaryText,
+  accessBoundary: ordinaryText,
+  observedAt: isoInstant,
+  collector: ordinaryText,
+  immutableLocator: ordinaryText.optional(),
+  contentDigest: ordinaryText.optional(),
+  retention: ordinaryText,
+};
+
+function validateEvidenceLocation(
+  reference: { immutableLocator?: string | undefined; contentDigest?: string | undefined },
+  context: { addIssue(issue: { code: "custom"; message: string }): void },
+) {
+  if (!reference.immutableLocator && !reference.contentDigest) {
+    context.addIssue({ code: "custom", message: "an Evidence Reference requires an immutable locator or digest" });
+  }
+}
+
+const sourceEvidenceReference = z
   .object({
-    evidenceId: ordinaryText,
+    ...evidenceReferenceFields,
     kind: z.literal("source"),
-    sanitizedSummary: sanitizedText,
-    classification: ordinaryText,
-    accessBoundary: ordinaryText,
-    observedAt: isoInstant,
-    collector: ordinaryText,
-    immutableLocator: ordinaryText,
-    retention: ordinaryText,
   })
-  .strict();
+  .strict()
+  .superRefine(validateEvidenceLocation);
+
+/** Runtime schema shared by source, Recurrence, and Regression Evidence References. */
+export const evidenceReferenceSchema = z
+  .object({
+    ...evidenceReferenceFields,
+    kind: z.enum(["source", "recurrence", "regression"]),
+    supportedRevision: z.number().int().positive(),
+  })
+  .strict()
+  .superRefine(validateEvidenceLocation);
 const confidence = z
   .object({
     level: z.enum(["hypothesis", "supported", "demonstrated"]),
@@ -84,7 +116,7 @@ export const reviewAssignment = z
 export const captureCandidateCommandSchema = z
   .object({
     lessonId: ordinaryText,
-    schemaVersion: ordinaryText,
+    schemaVersion: operationalLessonSchemaVersion,
     title: sanitizedText,
     actor,
     occurredAt: isoInstant,
@@ -93,7 +125,7 @@ export const captureCandidateCommandSchema = z
     failureMode: sanitizedText,
     sanitization,
     evidenceSummary: sanitizedText,
-    evidenceReferences: z.array(evidenceReference).min(1),
+    evidenceReferences: z.array(sourceEvidenceReference).min(1),
     confidence,
     recurrenceSignature: sanitizedText,
     invariant: sanitizedText,
@@ -190,17 +222,10 @@ const severeFirstOccurrence = z.object({
   deterministicRegressionEvidence: z.array(ordinaryText).min(1),
 }).strict();
 const approvalEvidenceReference = z.object({
-  evidenceId: ordinaryText,
+  ...evidenceReferenceFields,
   kind: z.enum(["recurrence", "regression"]),
   supportedRevision: z.number().int().positive(),
-  sanitizedSummary: sanitizedText,
-  classification: ordinaryText,
-  accessBoundary: ordinaryText,
-  observedAt: isoInstant,
-  collector: ordinaryText,
-  immutableLocator: ordinaryText,
-  retention: ordinaryText,
-}).strict();
+}).strict().superRefine(validateEvidenceLocation);
 /** Runtime schema for one exact lesson revision reference. */
 export const lessonRevisionReferenceSchema = z.object({ lessonId: ordinaryText, revisionId: ordinaryText }).strict();
 
@@ -441,3 +466,11 @@ export const activeLessonReviewCommandSchema = z.object({
     }
   }
 });
+
+/** Runtime schema for replacing retained evidence with its durable deletion tombstone. */
+export const evidenceRetentionCommandSchema = z.object({
+  actor,
+  occurredAt: isoInstant,
+  contentDigest: ordinaryText,
+  reason: sanitizedText,
+}).strict();
