@@ -1,0 +1,4 @@
+interface:
+  display_name: "My Git Flow"
+  short_description: "Check, commit, push, and prune safely"
+  default_prompt: "Use $my-git-flow to validate and fix my current changes, then stage, commit, push, and safely prune stale branches."

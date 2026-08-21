@@ -16,7 +16,7 @@ The v1 support boundary is macOS running zsh. Bootstrap requires `git` and macOS
 
 Use `--no-input` for automation-safe setup. `--replace` is intentionally narrow: it can replace only a link previously recorded as Hub-managed. Existing files, directories, and foreign symlinks are conflicts left untouched. A run can finish `INCOMPLETE` after applying independent valid work; its nonzero status and per-item messages identify what to fix.
 
-`carlo-baseline` installs 45 selected skills under `AGENTS_HOME` (default `~/.agents`): 44 authored skills in `skills/` plus the reviewed third-party `wizard` skill. Its `CLAUDE_HOME` (default `~/.claude`) and `CODEX_HOME` (default `~/.codex`) skill roots are directory links to that canonical projection. Third-party Source skills are exposed only through a reviewed manifest mapping and profile selection.
+`carlo-baseline` installs 46 selected skills under `AGENTS_HOME` (default `~/.agents`): 45 authored skills in `skills/` plus the reviewed third-party `wizard` skill. Its `CLAUDE_HOME` (default `~/.claude`) and `CODEX_HOME` (default `~/.codex`) skill roots are directory links to that canonical projection. Third-party Source skills are exposed only through a reviewed manifest mapping and profile selection.
 
 ## Source updates
 
