@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create GitHub Repository"
+  short_description: "Create a repository under a GitHub organization"
+  default_prompt: "Use $create-github-repo to create a new GitHub repository from its name, visibility, and organization."
