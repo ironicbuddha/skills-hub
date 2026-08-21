@@ -1,6 +1,6 @@
 ---
 name: instantiate-new-project
-description: Create an empty GitHub repository, clone it to an explicitly chosen local path, and configure the checkout for Wayfinder and related engineering skills. Use for a brand-new GitHub project, or to resume this orchestration after a partially completed run; do not use to adopt an unrelated existing repository.
+description: Create an empty GitHub repository, establish it locally by cloning into a new path or initializing an explicitly chosen existing non-Git project directory, and configure it for Wayfinder and related engineering skills. Use for a brand-new GitHub project, or to resume this orchestration after a partially completed run; do not use to adopt an unrelated or already Git-managed repository.
 ---
 
 # Instantiate New Project
@@ -17,18 +17,31 @@ Read and follow both prerequisite skills:
 2. [`setup-matt-pocock-skills`](../setup-matt-pocock-skills/SKILL.md)
 
 Run remote creation and verification first. Run repository setup only after the
-verified remote has been cloned successfully.
+verified remote has been established successfully as `origin` at the local
+target.
 
 ## Establish the target
 
 Collect the inputs required by `create-github-repo`: repository name,
-visibility, and GitHub organization. Also establish one explicit local
-destination path for the clone.
+visibility, and GitHub organization. Also establish one explicit local target
+and one of these modes:
 
-If the destination is missing, ask for it before remote creation. Recommend
-`<current-directory>/<repository>` only when the current directory is clearly
-the intended project parent. Resolve the path and show it to the user; do not
-invent a home or development root. The destination must not already exist.
+- **New clone** — clone the empty remote into a destination that does not exist.
+- **Existing project directory** — initialize an existing directory whose
+  current contents the user explicitly intends to make the new project.
+
+If the target or mode is missing, ask before remote creation. Recommend the
+current directory only when the user says to use it or it is clearly the
+intended existing project. Recommend `<current-directory>/<repository>` only
+when the current directory is clearly the intended project parent. Resolve the
+path and show it to the user; do not invent a home or development root.
+
+Inspect the resolved target before remote creation. A new-clone destination
+must not exist. An existing project target must be a directory and must not be
+a Git worktree, a directory inside another worktree, or contain a `.git` entry.
+List its current contents so later verification can distinguish them from
+changes made by this workflow. If any of these checks fail, stop rather than
+adopting or nesting a repository.
 
 Ask only for unresolved inputs, one at a time. Do not create a directory,
 initialize Git, clone, or write setup files while collecting them.
@@ -39,13 +52,17 @@ Run `create-github-repo` with the resolved organization, repository, and
 visibility. Preserve its read-only preflight, exact `confirm` gate, empty-repo
 creation command, and verification step.
 
+Alongside the creation summary, show the resolved local mode and path so the
+exact `confirm` also covers how the verified remote will be established locally.
+
 If the repository already exists or creation is not verified, stop. Do not
-adopt the collision, retry creation, clone it, or proceed to setup.
+adopt the collision, retry creation, establish it locally, or proceed to setup.
 
-## Clone the verified repository
+## Establish the local repository
 
-After creation is verified, clone exactly that repository to the agreed
-destination:
+After creation is verified, perform only the selected local mode.
+
+For **new clone**, clone exactly that repository to the agreed destination:
 
 ```bash
 gh repo clone "<organization>/<repository>" "<destination>"
@@ -54,19 +71,33 @@ gh repo clone "<organization>/<repository>" "<destination>"
 This clone is authorized by the user's invocation of this orchestration skill;
 it is deliberately outside the narrower `create-github-repo` skill.
 
-Verify that:
+For **existing project directory**, initialize the agreed target with `main` as
+the initial branch and add only the verified repository as `origin`:
 
-- the destination is the Git worktree root;
+```bash
+git -C "<target>" init -b main
+git -C "<target>" remote add origin "https://github.com/<organization>/<repository>.git"
+```
+
+This initialization is authorized only after the user explicitly selects the
+existing project directory. Do not stage its files, create a commit, or push.
+
+For either mode, verify that:
+
+- the agreed local target is the Git worktree root;
 - `origin` identifies the verified `<organization>/<repository>` remote; and
-- the worktree contains no unexpected files.
+- the workflow did not add or alter unexpected files. In existing-directory
+  mode, the pre-existing project files should remain unmodified and only the
+  `.git/` metadata should be new.
 
-If cloning or verification fails, inspect the remote and local path once, then
-stop with the repository URL, observed local state, and exact failure. Do not
-retry, delete the remote, remove the destination, or silently choose a new path.
+If local establishment or verification fails, inspect the remote and local path
+once, then stop with the repository URL, observed local state, and exact
+failure. Do not retry, delete the remote, remove the destination or `.git/`, or
+silently choose a new path.
 
 ## Configure the checkout
 
-Treat the cloned destination as the active repository root and run
+Treat the established local target as the active repository root and run
 `setup-matt-pocock-skills` there. Do not configure the Skill Hub checkout or
 the parent directory.
 
@@ -87,10 +118,12 @@ explicitly requests them.
 ## Resuming and completion
 
 For a partial run, inspect both the named GitHub repository and agreed local
-destination before acting. Never recreate or reclone completed phases. Continue
-from the first incomplete phase only when the earlier phase is evidenced in the
-current conversation or the user explicitly asks to resume that exact project.
+target before acting. Never recreate, reclone, or reinitialize completed phases.
+Continue from the first incomplete phase only when the earlier phase is
+evidenced in the current conversation or the user explicitly asks to resume
+that exact project.
 
-The orchestration is complete only when remote creation, local clone, and the
-setup skill's writes are each verified. Report the GitHub URL, local path,
-created setup files, and which later skills can now consume the configuration.
+The orchestration is complete only when remote creation, local establishment,
+and the setup skill's writes are each verified. Report the GitHub URL, local
+path and mode, created setup files, and which later skills can now consume the
+configuration.

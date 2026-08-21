@@ -1,4 +1,4 @@
 interface:
   display_name: "Instantiate New Project"
   short_description: "Create and configure a new GitHub project"
-  default_prompt: "Use $instantiate-new-project to create an empty GitHub repository, clone it locally, and configure it for Wayfinder and the engineering skills."
+  default_prompt: "Use $instantiate-new-project to create an empty GitHub repository, establish it in a new or existing local project directory, and configure it for Wayfinder and the engineering skills."
