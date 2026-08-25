@@ -1,10 +1,10 @@
 # Project Standards Bootstrapper: Build-Ready Specification
 
-Status: implementation handoff
+Status: revised implementation handoff
 
 Owners: `dev-env-export` (engine, catalogue, templates, package policy, and standards payload) and Skill Hub (invocation and distribution skill)
 
-Source: the resolved decisions in [Chart a safe project standards bootstrapper](https://github.com/ironicbuddha/skills-hub/issues/1)
+Sources: the resolved decisions in [Chart a safe project standards bootstrapper](https://github.com/ironicbuddha/skills-hub/issues/1) and [Incorporate portable coding principles into project standards](https://github.com/ironicbuddha/skills-hub/issues/62), supported by the [Source Guidance audit and disposition ledger](research/source-guidance-audit.md)
 
 ## 1. Purpose
 
@@ -22,6 +22,9 @@ The bootstrapper is a verified-baseline installer, not a file copier or best-eff
 - Make rerunning an unchanged configuration against an unchanged Verified Baseline a true no-op that still re-verifies the contract.
 - Automate work when the caller already has authority and pause only when human identity, consent, secrets, billing, licence acceptance, organisation approval, SSO, or browser-only authority is required.
 - Generate a substantive Project Delivery Contract, executable verification, and concise Agent Guidance Adapters for every selected repository shape.
+- Curate Source Guidance into closed, versioned Catalogue Entries without making source material a runtime dependency or repository policy.
+- Bind deterministic checks, attributable reviews, manual-state verification, and governed waivers to exact rules, scopes, repository state, and catalogue identity.
+- Make catalogue upgrades explicit semantic review-and-adoption runs that preserve the current Verified Baseline until the complete target baseline verifies.
 
 ## 3. Non-goals
 
@@ -32,10 +35,31 @@ The bootstrapper is a verified-baseline installer, not a file copier or best-eff
 - Generic support for providers whose artifacts and verification are not modelled in the catalogue.
 - A global force, overwrite, skip, or best-effort mode.
 - Storing secret values, hidden reasoning, candidate-generation logs, or creativity scores.
+- Applying Source Guidance directly, fetching it at bootstrap runtime, or allowing it to override the Project Delivery Contract.
+- Project-local rule plugins, remote rule URLs, automatic latest-compatible catalogue selection, or silent policy weakening.
+- Claiming that a linter, score, generic approval, or agent judgment proves a judgment-heavy obligation.
 
 ## 4. Normative domain model
 
 Use the canonical vocabulary in `CONTEXT.md`.
+
+- **Catalogue Release**: an immutable, content-addressed bundle of schemas, Catalogue Entries, rules, checks, rendering and artifact contracts, migrations, fixtures, support evidence, and authoring provenance.
+- **Catalogue Entry**: the closed atomic support unit for one Core Baseline, Workload kind, or Capability kind. It owns its choices, rules, artifacts, composition relationships, verification declarations, fixtures, support evidence, and migration metadata.
+- **Catalogue Rule**: a stable-ID normative obligation owned by exactly one Catalogue Entry. A repository selects layer instances, never individual rules; every applicable rule must be satisfied, waived, failed, or incomplete.
+- **Catalogue Incompatibility**: a catalogue-declared combination of entries, rules, scopes, or Policy Choice values that cannot form a valid Bootstrap Configuration. It fails validation before planning and is distinct from a Conflict with Detected Repository State.
+- **Verification Requirement**: a typed obligation attached to a Catalogue Rule. Its kind is `deterministic-check`, `attributable-review`, or `manual-state`; multiple requirements compose conjunctively.
+- **Baseline Verification Requirement**: a requirement that must be satisfied or validly waived for the exact current repository state before a Verified Baseline may be established.
+- **Delivery Verification Requirement**: a requirement that demands fresh evidence for every affected future change. Baseline verification proves that the declared gate and policy are installed, never that future work already conforms.
+- **Catalogue Check**: a stable-ID deterministic verifier owned by a Catalogue Entry, with closed invocation, scope, prerequisites, toolchain, timeout, network and secret policy, retry policy, and pass criteria.
+- **Review Requirement** and **Review Evidence**: the catalogue-owned questions and attributable named-human conclusions for judgment-heavy obligations, including authority, independence, exact fingerprinted material, per-requirement conclusion (`accepted`, `changes-required`, or `unable-to-conclude`), findings, disposition, time, and freshness. An agent may prepare analysis but cannot be the accountable reviewer.
+- **Authority Class**: a closed catalogue role resolved to named identities or verifiable external decisions, with independence `none`, `not-author`, or `separate-authority` as declared by the requirement.
+- **Manual-State Requirement**: an exact externally or human-authorized state that must be read back mechanically where possible, or supported by catalogue-permitted named attestation when independent read-back genuinely does not exist.
+- **Verification Evidence**: immutable, secret-safe proof bound to exact rule and requirement IDs, scope, repository state, configuration and catalogue identities, declared inputs, invocation, toolchain, result, attempts, time, and output digest or immutable reference.
+- **Waiver Policy**: the rule-owned declaration `prohibited` or `governed`, including allowed reasons, authority, independence, maximum duration, compensating controls, and renewal conditions.
+- **Rule Waiver**: a committed, immutable-versioned authorization covering one rule, one exact scope, and named requirements. Versions progress through `proposed`, `active`, `expired`, `revoked`, `invalidated`, or `superseded`; only `active` provides coverage, and renewal creates a fresh version with new evidence and approval.
+- **Managed Suppression**: a catalogue-declared technical suppression whose authority, scope, and lifetime derive from one exact active Rule Waiver.
+- **Requirement Evaluation**: the deterministic current classification `satisfied`, `waived`, `failed`, or `incomplete`; there is no score or warning-success threshold.
+- **Catalogue Upgrade Plan**: a state-bound semantic comparison of exact current and target Catalogue Releases against the resolved repository configuration, including policy, scope, artifact, evidence, waiver, migration, and operator-decision effects.
 
 - **Core Baseline**: exactly one mandatory, workload-independent standards layer.
 - **Workload**: a stable instance with a unique ID, catalogue kind, exact repository-relative root, and fully resolved Policy Choices.
@@ -68,6 +92,7 @@ Use the canonical vocabulary in `CONTEXT.md`.
   "$schema": "<schema URL>",
   "schemaVersion": "<exact schema version>",
   "catalogueVersion": "<exact catalogue version>",
+  "catalogueDigest": "<exact content digest>",
   "core": {
     "kind": "core",
     "choices": {}
@@ -80,29 +105,40 @@ Use the canonical vocabulary in `CONTEXT.md`.
 
 Every object has a closed schema and rejects unknown fields. `extensions` is the only namespaced escape hatch. The resolved configuration materializes every accepted default. It must not contain mode, detection results, plans, conflicts, approvals, progress, run state, ownership, verification state, or secrets.
 
+`extensions` accepts only catalogue-registered, namespaced, schema-validated extension kinds. Unknown kinds or namespaces are invalid. Catalogue content is resolved locally from the exact version and digest; missing, mutable, or mismatched content fails closed rather than falling forward.
+
 `.project-standards/manifest.json` contains:
 
 - manifest schema version;
 - configuration digest;
 - catalogue and bootstrapper versions;
+- exact catalogue content digest and configuration, catalogue, bootstrapper, and schema digests;
 - optionally the verifying run ID for audit context;
 - one entry per Managed Artifact with stable artifact ID, owning layer instance, target locator, ownership granularity, semantic or byte fingerprint, and last verification state.
+- the current secret-safe Verification Evidence envelope required to recompute baseline acceptance, including exact bindings, outcomes, attribution, freshness, digests, and immutable external references;
+- references to the exact active Rule Waiver versions and digests that cover waived requirements.
 
-The manifest is a current ledger, not an append-only log. It never depends on retained backups and never describes partial ownership.
+The manifest is a current ledger, not an append-only log. Raw output and verbose diagnostics remain in gitignored run state or their authoritative external system and are never the sole proof. The manifest never depends on retained backups and never describes partial ownership.
+
+Governed waiver records live at `.project-standards/waivers/<waiver-id>.json`. Each immutable version records one rule, one exact scope, named requirements, reason and constraint evidence, risk, compensating controls and their evidence, requester, approvers and authorities, remediation, validity boundary, upgrade disposition, digest, and lifecycle state. Wildcard scopes and multi-rule waivers are invalid. Expiry, revocation, or invalidation removes coverage immediately; its Managed Suppression must be removed atomically or the baseline becomes incomplete.
 
 ### 5.2 Validation layers
 
 JSON Schema validates closed structure, types, and required fields. The pinned catalogue additionally validates:
 
 - supported kinds and stable IDs;
+- exact Catalogue Release identity and digest;
+- complete Catalogue Entries with stable rule, artifact, check, requirement, fixture, and migration identities;
 - unique Workload IDs and roots;
 - Policy Choice values and resolved defaults;
-- Capability scopes, cardinality, dependencies, and incompatibilities;
+- deterministic rule applicability from declared kinds, shapes, Policy Choices, Capability presence, and explicit scopes;
+- Capability scopes, cardinality, `requires`, `refines`, and incompatibilities;
 - nested-root composition contracts;
 - artifact ownership and declared merge contracts;
 - runtime-selection rules and Runtime Rationale requirements.
+- closed Verification Requirements, Waiver Policies, Authority Classes, and extension registrations.
 
-Two selected layers may target the same artifact only when the catalogue declares an explicit composition or merge contract. There is no implicit precedence. Schema-version changes use explicit migrations; catalogue or configuration versions never upgrade silently.
+Applicable rules compose conjunctively. `refines` strengthens or operationalizes a rule without weakening it; `requires` declares a dependency; `incompatibleWith` rejects an invalid configuration. Two selected layers may target the same artifact only when the catalogue declares an explicit composition or merge contract. There is no implicit precedence. Schema-version changes use explicit migrations; catalogue or configuration versions never upgrade silently.
 
 ## 6. First-release selection matrix
 
@@ -134,15 +170,33 @@ The default frontend/backend composition is a web Workload plus `node-service`. 
 | `persistence` | Workload | Explicit selection |
 | `authentication` | Workload | Explicit selection |
 | `observability` | Workload | Required for production services, workers, and scheduled jobs |
-| `public-interface` | Workload | Recommend for HTTP/API shapes; require confirmation |
+| `public-interface` | one named Interface Boundary on exactly one Workload | Recommend for stable consumer-facing boundaries; `declared-contract` or `http-rest` style |
 | `secret-management` | repository-wide or Workload | Required wherever secrets are used |
 | `creative-markdown` | Workload | Explicit selection; requires `markdown-content` |
+| `modular-design` | exactly one executable Workload | Explicit opt-in; requires a substantive architecture overview |
+| `domain-modeling` | explicit set of one or more Workloads | Explicit opt-in; requires substantive domain glossary artifacts |
+| `ports-and-adapters` | exactly one executable Workload | Explicit opt-in; requires `modular-design` on the same Workload and a substantive boundary map |
 
 Multiple deployment Capabilities may target one Workload only for distinct named environments or purposes. Two providers claiming the same environment are incompatible. Cross-Workload Capabilities identify Workloads by ID and never infer topology.
+
+Each `public-interface` instance has a stable boundary identity and owns disjoint artifacts. `declared-contract` applies consumer-fit, explicit-contract, compatibility, boundary-validation, bounded-data, documentation, and contract-test obligations without inventing protocol semantics. `http-rest` refines those obligations with HTTP resource, method, status, error, and OpenAPI-oriented checks. GraphQL, RPC, and event-specific semantics require future researched Catalogue Entries or variants.
+
+`modular-design`, `domain-modeling`, and `ports-and-adapters` remain independently selectable except for the explicit ports-and-adapters dependency. No repository shape activates them automatically. The catalogue does not contain a `solid` or architecture mega-Capability. Compatible architecture Capabilities may share one coherent artifact, but empty generated templates never satisfy their Review Requirements.
 
 ### 6.3 Selection Recipes
 
 The wizard may propose recipes for Next.js web app, Vite web app, TypeScript service, Next.js plus Node service, Python automation, and Markdown content repository. A recipe visibly expands to proposed instances and choices, remains fully editable, and is absent from durable configuration. Python backend and experimental Vercel Services are never recipe defaults.
+
+### 6.4 Curated Source Guidance boundary
+
+The [Source Guidance audit and disposition ledger](research/source-guidance-audit.md) is the complete classification record. The first revised Catalogue Release applies it as follows:
+
+- portable outcome-oriented obligations enrich the Core Baseline only when they meet the universal inclusion test, otherwise the owning Workload or existing Capability;
+- modularity, domain language, and ports/adapters outcomes become the three explicit architecture Capabilities above; useful SOLID outcomes canonicalize into Core or `modular-design`, while numeric and absolute dogma is rejected;
+- agent-workflow rituals, arbitrary thresholds, copied examples, and source-specific boilerplate do not become Catalogue Rules;
+- Angular, .NET, Azure Bicep, and LikeC4 guidance remains deferred and supplies no runtime policy in the first revised release.
+
+The catalogue is closed-world. A future platform or protocol Entry is admitted atomically only with stable kind, rule, artifact, check, requirement, and migration IDs; a primary-evidence-backed compatibility envelope; complete scope, choices, applicability, composition and incompatibility declarations; rendering and ownership contracts; deterministic and review evidence; representative initialize, adopt, Conflict, drift, no-op, and upgrade fixtures; and named maintenance ownership. Target repositories cannot add executable policy plugins or partially enable unsupported guidance.
 
 ## 7. Package, repository, CI, test, and deployment policies
 
@@ -188,7 +242,11 @@ Selected Workloads and Capabilities add package files, lockfiles, tool configura
 
 ### 8.2 Constitution composition
 
-The Core Baseline supplies invariant policy for code and dependencies, testing expectations, delivery gates, security and secrets, documentation, narrow changes, and preservation of unrelated work. Workloads add runtime tooling, commands, test layers, build rules, and delivery guidance. Capabilities add selected cross-cutting policy. The rendered constitution contains no unused alternatives, addenda, or placeholders.
+The Core Baseline contains only outcome-oriented obligations valid for every repository whenever their subject exists and independent of platform or optional architecture. Workloads add platform and runtime obligations. Capabilities add explicitly selected cross-cutting or architectural policy. Detected Repository State never silently activates or deactivates policy.
+
+Render the Project Delivery Contract by repository meaning and exact scope: repository-wide obligations; named Workloads with roots and commands; cross-Workload contracts and shared Capabilities; then governance, active waivers, and verification expectations. Each applicable Catalogue Rule renders exactly once as a titled normative clause with its stable semantic ID visible but unobtrusive. Compatible refinements co-render as one clause while retaining every contributing rule ID. Unselected alternatives, duplicate prose, source-layer boilerplate, and placeholders do not render.
+
+Every Catalogue Rule retains immutable authoring provenance within its release: authorizing decision or specification, exact Source Guidance revision and locator where applicable, disposition, and adaptation rationale. Provenance does not affect runtime applicability and does not render into the Project Delivery Contract. The curated Catalogue Rule is authoritative.
 
 Agent Guidance Adapters route to the constitution and command/docs locations, require nested guidance, preserve unrelated work, state secret and external-authority boundaries, and link domain/architecture docs when present. They do not duplicate coding or testing policy, and no adapter filename has precedence.
 
@@ -221,7 +279,9 @@ Each Planned Change uses exactly one strategy:
 - `satisfied`: verified state already fulfils the requirement;
 - `defer`: make no change; if required, the result is Incomplete.
 
-The plan records target, owner, reason, precondition fingerprints, semantic/textual diff, verification, reversibility, backup, and recovery. Secret-bearing diffs are redacted without weakening fingerprints. Planning may continue around Conflicts, but execution starts only after every Conflict in the reviewed plan has a structured resolution. Removing or deferring selected scope requires replanning.
+Applicability is derived solely from the exact Catalogue Release and fully resolved Bootstrap Configuration. Detected Repository State may reveal missing or contradictory intent and force replanning, but it cannot infer or rescope policy. Catalogue Incompatibilities fail before planning; Conflicts remain state and ownership collisions discovered during planning.
+
+The plan records target, owner, reason, contributing rule and requirement IDs, precondition fingerprints, semantic/textual diff, verification and review obligations, waiver effects, reversibility, backup, and recovery. Secret-bearing diffs are redacted without weakening fingerprints. Planning may continue around Conflicts, but execution starts only after every Conflict in the reviewed plan has a structured resolution. Removing or deferring selected scope requires replanning. Inline suppressions, disabled checks, ADRs, issue links, or ignored paths never weaken policy unless represented by a valid Rule Waiver and, where applicable, a matching Managed Suppression.
 
 One final confirmation authorizes the exact resolved plan. Destructive replacement and destructive merge also require per-change approval. Additive declared merges may use overall approval. Drift or any plan change voids affected authorization. There is no wildcard approval or durable overwrite preference.
 
@@ -235,7 +295,13 @@ Successful run directories remain until explicit cleanup. Cleanup refuses active
 
 A Manual Stage may preserve candidate state while paused. It records exact instructions, resume point, expected evidence, and abandonment/recovery command. Resume re-inspects relevant state and replans on drift.
 
-For the same Bootstrap Configuration and unchanged Verified Baseline, rerun performs no writes, installs, backups, manifest churn, or Manual Stages. It re-verifies and reports requirements as satisfied. Semantic normalization is used only where declared. Managed drift, surrounding user changes, version changes, and intent changes are reported distinctly.
+For the same Bootstrap Configuration and unchanged Verified Baseline, rerun performs no writes, installs, backups, manifest churn, or Manual Stages. It re-evaluates every applicable Verification Requirement from fresh or still-valid evidence and reports each as satisfied or waived. Semantic normalization is used only where declared. Managed drift, surrounding user changes, version changes, evidence invalidation, waiver expiry, and intent changes are reported distinctly.
+
+A catalogue upgrade uses the same planning, approval, execution, recovery, and verification machinery. The current release remains authoritative while candidate artifacts, configuration, manifest, waiver disposition, and evidence are prepared. The target configuration, Project Delivery Contract, manifest, and evidence promote together only when every target requirement is satisfied or validly waived. Failure preserves the old Verified Baseline only when its exact state is restored; mixed releases and partial promotion are forbidden.
+
+Verification Evidence is reusable across an upgrade only when bound repository inputs remain unchanged and the target preserves the semantic digests of the rule, requirement, check behaviour, scope, Authority Class, independence, and freshness policy. A reviewed equivalence migration may explicitly bind old and new identities with rationale and acceptance fixtures; otherwise any semantic change invalidates evidence. Provenance-only and formatting-only changes may reuse evidence when normative and verification digests are unchanged.
+
+A Rule Waiver carries forward only when its exact rule, requirements, scope, Waiver Policy, risk assumptions, Authority Class, independence, compensating controls, and evidence remain valid and the plan exposes the carry. Removed rules retire their waivers. Tightened or prohibited waiver policy invalidates them without grandfathering. A named human explicitly selects and approves the exact target release; background upgrades, wildcard approvals, and silent defaults are forbidden.
 
 ## 12. Interactive journey and captured values
 
@@ -246,12 +312,12 @@ The wizard uses ten guided-choice stages:
 | 1. Inspect | Select exact root; review detected facts and boundaries | root identity and Detected Repository State fingerprints |
 | 2. Choose mode | Review recommendation and exact eligibility evidence | explicit `initialize` or `adopt` for this run |
 | 3. Select shape | Optionally choose a Selection Recipe; inspect expanded proposal | proposed Workload and Capability instances |
-| 4. Resolve intent | Review every visible default, dependency, choice, and rationale | complete Bootstrap Configuration candidate and Runtime Rationale where required |
-| 5. Review plan | Inspect ownership, diffs, Conflicts, verification, reversibility, and recovery | state-bound Planned Changes and Conflict resolutions |
+| 4. Resolve intent | Select the exact Catalogue Release; review every visible default, dependency, incompatibility, choice, scope, and rationale | complete Bootstrap Configuration candidate, target catalogue version and digest, and Runtime Rationale where required |
+| 5. Review plan | Inspect ownership, semantic policy and artifact diffs, Conflicts, evidence reuse or invalidation, waiver disposition, verification, reversibility, and recovery | state-bound Planned Changes or Catalogue Upgrade Plan and Conflict resolutions |
 | 6. Authorize | Confirm the exact plan; separately approve destructive merge/replace | plan fingerprint and scoped approvals |
 | 7. Execute | Allow deterministic local and authenticated API operations | progress, operation evidence, backups, and API results |
-| 8. Manual authority | Follow exact URL/CLI instructions only where human authority is required | non-sensitive Secret References and verifiable resulting evidence; never secret values |
-| 9. Verify | Review every selected contract check | check results and candidate provenance |
+| 8. Manual authority | Complete attributable reviews or exact external-state work only where named human or provider authority is required | Review Evidence, non-sensitive Secret References, and Verification Evidence for Manual-State Requirements; never secret values |
+| 9. Verify | Review every applicable Verification Requirement and active waiver | Requirement Evaluations and candidate provenance |
 | 10. Finish | Review terminal outcome, changes, checks, recovery retention, and next commands | final report and, only if verified, promoted config/manifest |
 
 Each stage first shows a recommendation, reason, relevant choices, and consequence. Details are progressively disclosed at their review gate. Going back is safe before execution. The wizard may open exact URLs or show CLI paths but must not invent provider journeys or treat acknowledgement as evidence.
@@ -261,7 +327,7 @@ Each stage first shows a recommendation, reason, relevant choices, and consequen
 The implementation may choose the executable name, but it must expose these semantic operations consistently in interactive and automation modes:
 
 - `inspect <root>`: read-only Detected Repository State and mode recommendation.
-- `plan <root>`: interactive intent resolution by default; automation accepts an explicit mode and complete config, then emits a fingerprinted plan without mutation.
+- `plan <root>`: interactive intent resolution by default; automation accepts an explicit mode and complete config. An existing baseline may specify an exact target catalogue version and digest, producing a Catalogue Upgrade Plan when the pin changes. Planning never selects `latest`.
 - `apply <plan>`: execute only the exact approved plan; automation supplies structured fingerprint-bound approvals, never `--yes` or `--force`.
 - `resume <run-id>`: re-inspect and continue a paused Manual Stage or recover an interrupted execution.
 - `verify <root>`: verify the committed configuration and manifest without changing intent.
@@ -276,23 +342,32 @@ Machine-readable output includes schema version, run ID, mode, plan/configuratio
 
 A run is `verified` only when all of the following hold:
 
-1. Configuration and provenance validate against their pinned schemas and catalogue.
+Every applicable Verification Requirement first evaluates independently to:
+
+- `satisfied`: its deterministic check passed, attributable review was accepted, manual state was verified, or its required delivery gate and policy passed baseline verification;
+- `waived`: one exact active Rule Waiver validly covers it, visibly and without pretending it passed;
+- `failed`: trustworthy evidence disproves it, including a failed check, `changes-required` review, or violated non-waivable invariant;
+- `incomplete`: evidence is missing, stale, errored, not run, unable to conclude, awaiting authority, or covered only by a non-active waiver.
+
+Only `satisfied` and `waived` contribute to a Verified Baseline. A deterministic check reports `passed`, `failed`, or `error`; absence is `not-run`, and only `passed` satisfies its requirement. Agents may prepare review analysis but cannot supply accountable human Review Evidence. Core closed-configuration, exact-pin, secret-exclusion, evidence-authenticity, atomic-promotion, and truthful-outcome invariants are non-waivable.
+
+1. Configuration, provenance, waivers, and evidence validate against their pinned schemas and exact content-addressed Catalogue Release.
 2. Every Planned Change postcondition passes and no Conflict remains unresolved.
 3. Every Managed Artifact or fragment has a stable identity, owner, locator, and matching semantic/byte fingerprint.
 4. User-owned surrounding and unrelated content is preserved.
-5. `constitution.md` contains every selected requirement, no unselected material, and no unresolved placeholder.
+5. `constitution.md` renders every applicable Catalogue Rule exactly once by repository meaning and scope, exposes contributing rule IDs and active waivers, contains no unselected material, and has no unresolved placeholder.
 6. Agent Guidance Adapters route to the Project Delivery Contract and do not contradict or duplicate it.
 7. Managed links resolve to substantive documents and referenced commands exist.
 8. Package managers, exact runtime pins, and lockfiles are internally consistent; immutable installation succeeds where selected.
 9. Every Workload's format, lint, applicable typecheck, tests/content checks, and build/package checks pass.
-10. Every selected Capability passes its deterministic checks and required Manual Stage evidence.
+10. Every applicable Verification Requirement is satisfied or validly waived with fresh, exact-bound evidence; judgment-heavy rules have attributable human Review Evidence rather than mechanical proxy scores.
 11. Deployment Capabilities establish artifact identity, environment mapping, smoke verification, recovery, and status reporting.
 12. No unexplained managed drift, ownership ambiguity, or state drift remains.
-13. Candidate `.project-standards/config.json` and `.project-standards/manifest.json` are promoted together only after all checks pass.
+13. Candidate configuration, contract, manifest, waiver disposition, and evidence are promoted together only after the full acceptance reducer returns `verified`.
 14. A repeated run against the unchanged Verified Baseline is a write-free no-op and returns `verified` after re-verification.
 15. Failure, cancellation, and interruption tests prove rollback/recovery without changing unrelated work or promoting partial provenance.
 
-First-release acceptance must include fixtures for eligible empty roots; substantive roots; dirty worktrees; symlinks and nested repositories; existing compatible, complementary, contradictory, and ambiguous artifacts; each Workload; valid and invalid Capability compositions; Python Runtime Rationale; structured fragments; drift between plan and apply; interrupted execution; incomplete Manual Stages; secret redaction; and unchanged reruns.
+First-release acceptance must include fixtures for eligible empty roots; substantive roots; dirty worktrees; symlinks and nested repositories; existing compatible, complementary, contradictory, and ambiguous artifacts; each Workload; valid and invalid Capability compositions; public-interface boundary overlap and both initial styles; all three architecture Capabilities and their dependency rules; Python Runtime Rationale; structured fragments; deterministic-check pass/fail/error/not-run; attributable review outcomes and independence; Manual-State assurance; waiver proposal, activation, expiry, invalidation, renewal, suppression, and prohibition; evidence freshness and drift; exact-digest mismatch; semantic catalogue upgrades with evidence reuse/invalidation and waiver carry/retirement; interrupted execution; secret redaction; and unchanged reruns.
 
 ## 15. Migration and cutover
 
@@ -307,7 +382,8 @@ A repository touched by the old starter uses an ordinary Adoption Run. Inspectio
 - bootstrapper engine and CLI;
 - configuration, manifest, plan, run-state, and machine-output schemas;
 - versioned catalogue, dependency/composition rules, and migrations;
-- templates, renderers, managed-fragment contracts, package/runtime policy, provider operations, and verification checks;
+- content-addressed Catalogue Releases, Source Guidance provenance, Catalogue Rules, checks, Verification Requirements, Waiver Policies, Authority Classes, and upgrade semantics;
+- templates, semantic renderers, managed-fragment contracts, package/runtime policy, provider operations, and verification engines;
 - recovery machinery, tests, documentation, and release/cutover work.
 
 Skill Hub owns:
@@ -320,19 +396,67 @@ Skill Hub must not duplicate templates, policy payload, catalogue data, schemas,
 
 ## 17. Ordered implementation handoff
 
-Implement as tracer bullets in this order; each ticket must leave its slice executable and tested before the next begins.
+Implement as tracer bullets in this dependency order. Parallelize only after each ticket's declared blockers close; every ticket must leave its slice executable and tested.
 
-1. **Establish schemas, catalogue, and domain validation** — Implement versioned configuration/manifest schemas, stable layer IDs, catalogue validation, Policy Choice resolution, composition rules, and representative fixtures.
-2. **Build exact-root inspection and mode eligibility** — Fingerprint the root and relevant filesystem/Git state; detect boundaries and hazards; recommend but require explicit run mode.
-3. **Build deterministic planning and ownership-aware diffs** — Produce stable Planned Changes, closed strategies, Conflict records, fragment ownership, redacted review output, and plan fingerprints without mutation.
-4. **Build run storage, atomic file execution, and recovery** — Add run locking, restrictive run directories, backups, staged writes, reverse rollback, interruption recovery, cleanup guards, and cancellation semantics.
-5. **Render and verify the Core Baseline** — Generate/adopt `constitution.md`, adapters, README links, configuration, provenance, and substantive documentation checks with precise ownership.
-6. **Add Workload catalogue slices** — Implement the six Workloads, intrinsic package/runtime/tooling artifacts, exact pins, lockfiles, and executable verification contracts.
-7. **Add local policy Capabilities** — Implement TDD, persistence, authentication, observability, public-interface, secret-management, and creative-markdown composition and verification.
-8. **Add GitHub repository and CI Capabilities** — Implement authenticated operations, state comparison, least-privilege CI composition, full-SHA actions, stable checks, Manual Stages, and Conflict handling.
-9. **Add deployment Capabilities** — Implement Vercel and AWS verified deployment contracts, then the separately gated experimental Vercel Services topology and preflights.
-10. **Build the interactive and non-interactive front ends** — Deliver the ten-stage guided wizard, plan/apply separation, structured approvals, resume/status/recover flows, machine-readable parity, and outcome-specific exits.
-11. **Prove end-to-end safety and no-op behavior** — Run the complete acceptance fixture matrix, fault injection, drift tests, rollback checks, secret-redaction tests, and byte/semantic no-op assertions.
-12. **Cut over distribution and archive legacy entry points** — Publish the thin Skill Hub successor, update active documentation/installers, archive the old script and both named skills, and execute Adoption Run smoke tests against representative legacy-touched repositories.
+1. **Establish the content-addressed catalogue foundation** — Deliver closed schemas, Catalogue Release and Entry identity, stable rule/artifact/check/requirement IDs, deterministic applicability, Policy Choice resolution, composition and incompatibility validation, Source Guidance provenance, fixtures, and migrations.
+2. **Inspect exact roots independently** — Build read-only repository and Git inspection once the configuration shape is stable. Inspection may expose conflicting state but never infer durable policy.
+3. **Implement the shared verification reducer** — Record immutable exact-bound deterministic, attributable-review, and manual-state evidence; enforce horizons, freshness, drift invalidation, authority, and the four Requirement Evaluations.
+4. **Implement governed weakening** — Add closed Waiver Policies, immutable Rule Waiver lifecycles, compensating-control evidence, Managed Suppressions, visible contract/manifest effects, and fail-closed expiry or invalidation.
+5. **Plan with policy and ownership context** — Produce state-bound Planned Changes that expose contributing rules, requirements, semantic diffs, evidence obligations, waiver effects, Conflicts, and recovery without mutation.
+6. **Execute and recover atomically** — Add guarded run custody, backups, staged writes, rollback, interruption recovery, cancellation, and atomic candidate promotion without touching unrelated work.
+7. **Render and verify the Core Baseline semantically** — Render each applicable rule once by meaning and scope, co-render refinements, expose stable IDs and active waivers, and establish the first complete Verified Baseline.
+8. **Add catalogue upgrade adoption** — Reuse `plan`, `apply`, recovery, and verification for exact target releases; expose semantic policy/artifact/evidence/waiver changes and promote only a completely verified target.
+9. **Add the six Workload Catalogue Entries** — Implement complete closed entries for Next.js, Vite, Node service, TypeScript package, Python, and Markdown content, including rules, artifacts, checks, review obligations, provenance, fixtures, and migrations.
+10. **Add established local-policy Capability Entries** — Implement TDD, persistence, authentication, secret management, and creative Markdown as independently verifiable Catalogue Entries.
+11. **Add architecture Capability Entries** — Implement `modular-design`, `domain-modeling`, then `ports-and-adapters` with its same-Workload modular-design dependency; preserve independent opt-in and substantive human-review evidence.
+12. **Add observability and public-interface Entries** — Deliver one atomic Entry per Capability; model named Interface Boundaries, disjoint ownership, and the `declared-contract` and `http-rest` styles without inventing other protocol policy.
+13. **Add GitHub repository and CI Entries** — Implement authenticated state comparison, least-privilege CI composition, full-SHA actions, stable delivery gates, attributable/manual evidence, and Conflict handling.
+14. **Add deployment Entries** — Implement Vercel and AWS verified deployment contracts, then the separately gated experimental Vercel Services topology and preflights.
+15. **Build the interactive and automation callers** — Deliver the ten-stage journey and matching automation with explicit catalogue pins, semantic upgrade review, structured approvals, resume/status/recover flows, and outcome-specific exits over the same engine.
+16. **Prove the complete acceptance model** — Exercise every repository shape, content Entry, composition, evidence result, authority constraint, waiver lifecycle, semantic upgrade, fault, recovery, drift, redaction, and write-free rerun fixture.
+17. **Release the authoritative implementation** — Publish the verified `dev-env-export` release and content-addressed catalogue, then archive the old script without a shim.
+18. **Cut over Skill Hub** — Publish the thin invoker, remove the two legacy entry points from active discovery, and verify ordinary Adoption Runs on representative legacy-touched repositories.
 
-The handoff is complete when every ticket above has explicit dependencies, acceptance tests derived from section 14, and named ownership in the appropriate repository. Implementation must not reopen a resolved product decision merely to make sequencing convenient; any genuine contradiction must be raised against this specification and its linked decision record.
+The handoff is complete when every ticket below has native dependency edges, acceptance tests derived from section 14, and named ownership in the appropriate repository. Implementation must not reopen a resolved product decision merely to make sequencing convenient; any genuine contradiction must be raised against this specification and its linked decision records.
+
+## 18. Delivery ticket reconciliation
+
+The existing delivery graph remains the spine. `Amended` retains issue identity and user-value boundary while replacing its body with the revised contract. `Unchanged` means both scope and acceptance contract remain valid. `Replaced` closes a non-atomic slice in favour of named successors. No existing ticket is retired without a successor.
+
+| Delivery ticket | Disposition | Reconciliation |
+| --- | --- | --- |
+| [Establish versioned schemas and catalogue validation](https://github.com/ironicbuddha/skills-hub/issues/13) | Amended | Own the content-addressed Catalogue Release, atomic Entry/Rule model, applicability, composition, provenance, fixtures, and migrations; shared evidence and waivers move to dedicated foundations. |
+| [Inspect exact repository roots and recommend run eligibility](https://github.com/ironicbuddha/skills-hub/issues/14) | Unchanged | Inspection remains read-only evidence and never selects mode, policy, scope, or a catalogue release. |
+| [Produce deterministic ownership-aware plans](https://github.com/ironicbuddha/skills-hub/issues/15) | Amended | Add rule/requirement bindings, Catalogue Incompatibility boundary, semantic policy diffs, evidence obligations, and waiver effects. |
+| [Execute local changes atomically with rollback and recovery](https://github.com/ironicbuddha/skills-hub/issues/16) | Amended | Extend atomicity and recovery to candidate contract, evidence, waiver disposition, and exact-release promotion. |
+| [Render and verify the Core Baseline](https://github.com/ironicbuddha/skills-hub/issues/17) | Amended | Render by meaning and scope, co-render refinements, expose stable IDs and active waivers, and establish acceptance through the shared reducer. |
+| [Install and verify a Next.js web Workload](https://github.com/ironicbuddha/skills-hub/issues/18) | Amended | Deliver a complete `next-web` Catalogue Entry rather than only tooling and templates. |
+| [Install and verify a Vite web Workload](https://github.com/ironicbuddha/skills-hub/issues/19) | Amended | Deliver a complete `vite-web` Catalogue Entry rather than only tooling and templates. |
+| [Install and verify a Node service Workload](https://github.com/ironicbuddha/skills-hub/issues/20) | Amended | Deliver a complete `node-service` Catalogue Entry across every declared service shape. |
+| [Install and verify a TypeScript package Workload](https://github.com/ironicbuddha/skills-hub/issues/21) | Amended | Deliver a complete `typescript-package` Catalogue Entry and package-boundary evidence. |
+| [Install and verify a Python Workload](https://github.com/ironicbuddha/skills-hub/issues/22) | Amended | Deliver a complete `python-workload` Catalogue Entry, including Runtime Rationale rules and review evidence. |
+| [Install and verify a Markdown content Workload](https://github.com/ironicbuddha/skills-hub/issues/23) | Amended | Deliver a complete `markdown-content` Catalogue Entry with factual-validation requirements. |
+| [Compose and verify the TDD Capability](https://github.com/ironicbuddha/skills-hub/issues/24) | Amended | Deliver one complete Capability Entry with Baseline and Delivery Verification Requirements. |
+| [Compose and verify the persistence Capability](https://github.com/ironicbuddha/skills-hub/issues/25) | Amended | Deliver one complete Capability Entry with scoped operational, migration, recovery, and review obligations. |
+| [Compose and verify the authentication Capability](https://github.com/ironicbuddha/skills-hub/issues/26) | Amended | Deliver one complete Capability Entry with secret-safe evidence and scoped integration obligations. |
+| [Compose and verify observability and public-interface Capabilities](https://github.com/ironicbuddha/skills-hub/issues/27) | Replaced | One issue cannot be the atomic support unit for two Capability kinds; replace it with separate observability and public-interface Entries. |
+| [Compose and verify secret management](https://github.com/ironicbuddha/skills-hub/issues/28) | Amended | Deliver one complete Capability Entry with manual-state evidence and non-waivable secret-exclusion invariants. |
+| [Compose and verify creative Markdown policy](https://github.com/ironicbuddha/skills-hub/issues/29) | Amended | Deliver one complete Capability Entry while preserving observable-output and private-reasoning boundaries. |
+| [Manage GitHub repository configuration safely](https://github.com/ironicbuddha/skills-hub/issues/30) | Amended | Add a complete Entry contract, exact Authority Classes, manual-state read-back, and evidence freshness. |
+| [Compose and verify GitHub Actions CI](https://github.com/ironicbuddha/skills-hub/issues/31) | Amended | Add a complete Entry contract and Delivery Verification Requirements for every affected future change. |
+| [Deploy and verify selected Workloads on Vercel](https://github.com/ironicbuddha/skills-hub/issues/32) | Amended | Add a complete Entry contract with exact artifact, external-state, authority, freshness, and recovery evidence. |
+| [Deploy and verify selected Workloads on AWS](https://github.com/ironicbuddha/skills-hub/issues/33) | Amended | Add a complete Entry contract with exact artifact, OIDC, external-state, authority, freshness, and recovery evidence. |
+| [Gate and verify experimental Vercel Services](https://github.com/ironicbuddha/skills-hub/issues/34) | Amended | Add a complete experimental Entry contract with pinned support evidence, entitlement/schema preflight, and upgrade metadata. |
+| [Deliver interactive and automation CLI journeys](https://github.com/ironicbuddha/skills-hub/issues/35) | Amended | Add exact catalogue target selection and semantic upgrade review over the existing caller surface. |
+| [Prove safety, recovery, and write-free reruns](https://github.com/ironicbuddha/skills-hub/issues/36) | Amended | Expand acceptance to evidence, authority, waiver, suppression, digest, semantic upgrade, and atomic-promotion failures. |
+| [Release the successor bootstrapper and archive the old script](https://github.com/ironicbuddha/skills-hub/issues/37) | Amended | Release an immutable content-addressed catalogue with the verified engine before removing the legacy script. |
+| [Publish the thin successor Skill Hub invocation skill](https://github.com/ironicbuddha/skills-hub/issues/38) | Unchanged | Skill Hub remains a thin discoverable caller and owns no catalogue or policy implementation. |
+| [Archive legacy Skill Hub entry points and smoke-test Adoption Runs](https://github.com/ironicbuddha/skills-hub/issues/39) | Unchanged | Legacy-touched repositories still use ordinary Adoption with provenance established only after verification. |
+| [Implement verification evidence and the acceptance reducer](https://github.com/ironicbuddha/skills-hub/issues/68) | New | Shared exact-bound evidence and four-state acceptance foundation. |
+| [Implement governed waivers and managed suppressions](https://github.com/ironicbuddha/skills-hub/issues/69) | New | Shared governed weakening, lifecycle, compensating-control, and suppression foundation. |
+| [Implement catalogue upgrade planning and atomic adoption](https://github.com/ironicbuddha/skills-hub/issues/70) | New | Explicit semantic review-before-adoption vertical slice over the normal lifecycle. |
+| [Compose and verify the observability Capability](https://github.com/ironicbuddha/skills-hub/issues/71) | New | Atomic successor for the observability half of the replaced combined ticket. |
+| [Compose and verify the public-interface Capability](https://github.com/ironicbuddha/skills-hub/issues/72) | New | Atomic successor with Interface Boundary identity and initial declared-contract/http-rest styles. |
+| [Compose and verify the modular-design Capability](https://github.com/ironicbuddha/skills-hub/issues/73) | New | Independent opt-in architecture Capability with substantive review evidence. |
+| [Compose and verify the domain-modeling Capability](https://github.com/ironicbuddha/skills-hub/issues/74) | New | Independent explicit-Workload-set domain Capability with substantive glossary evidence. |
+| [Compose and verify the ports-and-adapters Capability](https://github.com/ironicbuddha/skills-hub/issues/75) | New | Same-Workload refinement requiring modular-design and a substantive boundary map. |
